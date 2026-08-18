@@ -22,21 +22,30 @@ active health checks, automatic tunnel rebuilds, egress failover and traffic acc
 - **Web admin**: admin-password login (session), upstream CRUD, automatic WARP account registration, manual wgcf config import, credential regeneration, settings, stats
 - **Single static binary**: written in Go, cross-compiles to Linux amd64/arm64, no runtime dependencies
 
-## Quick Start (Linux + systemd)
-
-Download the binary for your architecture from [Releases](../../releases) (or build it yourself, see below):
+## One-Click Install (Linux + systemd, recommended)
 
 ```bash
-# 1. Install
-sudo mkdir -p /etc/multi-cf-proxy
+curl -fsSL https://raw.githubusercontent.com/s12ryt/multi-cf-proxy/main/deploy/install.sh | sudo bash
+```
+
+The script automatically: detects architecture (amd64/arm64) → downloads the latest
+release → verifies sha256 → installs the binary and systemd service → enables and
+starts it → prints the admin password.
+
+- Pin a version: `... | sudo VERSION=v1.0.0 bash`
+- Uninstall: `... | sudo bash -s -- --uninstall`
+
+### Manual Install (alternative)
+
+Download the binary for your architecture from [Releases](../../releases):
+
+```bash
 sudo cp multi-cf-proxy-linux-amd64 /usr/local/bin/multi-cf-proxy
 sudo chmod +x /usr/local/bin/multi-cf-proxy
+sudo mkdir -p /var/lib/multi-cf-proxy
 sudo cp deploy/systemd/multi-cf-proxy.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now multi-cf-proxy
-
-# 2. Get the auto-generated admin password from the first boot
-sudo journalctl -u multi-cf-proxy | grep "管理員密碼"
+sudo systemctl daemon-reload && sudo systemctl enable --now multi-cf-proxy
+sudo journalctl -u multi-cf-proxy | grep "管理員密碼"   # password from first boot
 ```
 
 Open `http://<VPS>:8081`, log in, then:
@@ -55,17 +64,20 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o mul
 ./build.ps1
 ```
 
-## Docker
+## Docker (GHCR image)
 
 ```bash
-git clone https://github.com/s12ryt/multi-cf-proxy && cd multi-cf-proxy
-docker build -f deploy/Dockerfile -t multi-cf-proxy .
 docker run -d --name mcp \
   -p 1080:1080 -p 8080:8080 -p 8081:8081 \
   -v /srv/mcp:/config \
-  multi-cf-proxy
+  ghcr.io/s12ryt/multi-cf-proxy:latest
 docker logs mcp 2>&1 | grep "管理員密碼"   # password generated on first boot
 ```
+
+The `ghcr.io/s12ryt/multi-cf-proxy` image is built and pushed automatically by CI
+for `linux/amd64` and `linux/arm64`; tags: `latest`, `1.0` (major.minor),
+`1.0.0` (full version). You can also build from source:
+`docker build -f deploy/Dockerfile -t multi-cf-proxy .`
 
 ## Client Usage
 

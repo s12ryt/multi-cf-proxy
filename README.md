@@ -19,21 +19,29 @@
 - **Web 管理**：管理員密碼登入（session），上游增刪改、WARP 帳號自動註冊、手動導入 wgcf 配置、換帳密、設置、統計
 - **單二進制**：Go 編寫，交叉編譯 Linux amd64/arm64，無執行時依賴
 
-## 快速開始（Linux + systemd）
-
-從 [Releases](../../releases) 下載對應架構的二進制（或自行構建見下節）：
+## 一鍵安裝（Linux + systemd，推薦）
 
 ```bash
-# 1. 部署
-sudo mkdir -p /etc/multi-cf-proxy
+curl -fsSL https://raw.githubusercontent.com/s12ryt/multi-cf-proxy/main/deploy/install.sh | sudo bash
+```
+
+腳本自動：探測架構（amd64/arm64）→ 從 Releases 下載最新版 → sha256 校驗 →
+安裝二進制與 systemd 服務 → 啟動並設開機自啟 → 印出管理員密碼。
+
+- 指定版本：`... | sudo VERSION=v1.0.0 bash`
+- 解除安裝：`... | sudo bash -s -- --uninstall`
+
+### 手動安裝（替代）
+
+從 [Releases](../../releases) 下載對應架構的二進制：
+
+```bash
 sudo cp multi-cf-proxy-linux-amd64 /usr/local/bin/multi-cf-proxy
 sudo chmod +x /usr/local/bin/multi-cf-proxy
+sudo mkdir -p /var/lib/multi-cf-proxy
 sudo cp deploy/systemd/multi-cf-proxy.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now multi-cf-proxy
-
-# 2. 取得首次生成的管理員密碼
-sudo journalctl -u multi-cf-proxy | grep 管理員密碼
+sudo systemctl daemon-reload && sudo systemctl enable --now multi-cf-proxy
+sudo journalctl -u multi-cf-proxy | grep 管理員密碼   # 首次生成的密碼
 ```
 
 打開 `http://<VPS>:8081` 登入後：
@@ -52,17 +60,19 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o mul
 ./build.ps1
 ```
 
-## Docker
+## Docker（GHCR 鏡像）
 
 ```bash
-git clone https://github.com/s12ryt/multi-cf-proxy && cd multi-cf-proxy
-docker build -f deploy/Dockerfile -t multi-cf-proxy .
 docker run -d --name mcp \
   -p 1080:1080 -p 8080:8080 -p 8081:8081 \
   -v /srv/mcp:/config \
-  multi-cf-proxy
+  ghcr.io/s12ryt/multi-cf-proxy:latest
 docker logs mcp 2>&1 | grep 管理員密碼   # 首次生成的密碼
 ```
+
+鏡像 `ghcr.io/s12ryt/multi-cf-proxy` 由 CI 自動構建並推送，支持
+`linux/amd64` 與 `linux/arm64`；標籤：`latest`、`1.0`（major.minor）、`1.0.0`（完整版本）。
+也可以從原始碼自建：`docker build -f deploy/Dockerfile -t multi-cf-proxy .`
 
 ## 客戶端使用
 
