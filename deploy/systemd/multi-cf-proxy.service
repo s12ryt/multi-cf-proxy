@@ -10,9 +10,11 @@ Restart=always
 RestartSec=5
 # 專用靜態系統帳戶（install.sh 創建）。DynamicUser 在部分容器化 VPS 上
 # 會導致 exec EACCES（203/EXEC），故不使用。
+# 狀態目錄同樣由 install.sh 顯式建立與授權：容器環境對 StateDirectory
+# 的遷移/私有化行為不一（238/STATE_DIRECTORY），改用顯式 ReadWritePaths。
 User=multi-cf-proxy
 Group=multi-cf-proxy
-StateDirectory=multi-cf-proxy
+ReadWritePaths=/var/lib/multi-cf-proxy
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=yes

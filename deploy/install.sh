@@ -97,10 +97,20 @@ if [ "$EXEC_RC" = "126" ]; then
   exit 1
 fi
 
-# 清理 DynamicUser 時代遷移到 /var/lib/private 的殘留（若服務此前從未成功啟動、無配置）
-if [ -d "$PRIVATE_CONF_DIR" ] && [ ! -e "$CONF_DIR/config.json" ] && [ ! -e "$PRIVATE_CONF_DIR/config.json" ]; then
-  rm -rf "$PRIVATE_CONF_DIR" 2>/dev/null || true
+# ---- 修復歷史殘留 ----
+# DynamicUser 時代 systemd 會把 /var/lib/multi-cf-proxy 變成指向
+# /var/lib/private/multi-cf-proxy 的符號連結；若兩處皆無配置則全清，
+# 避免懸空符號連結導致 238/STATE_DIRECTORY 或 mkdir 失敗。
+# （rm -rf 對符號連結只刪連結本身，安全）
+if [ ! -e "$CONF_DIR/config.json" ] && [ ! -e "$PRIVATE_CONF_DIR/config.json" ]; then
+  [ -L "$CONF_DIR" ] && rm -f "$CONF_DIR"
+  [ -d "$PRIVATE_CONF_DIR" ] && rm -rf "$PRIVATE_CONF_DIR"
 fi
+
+# 顯式建立狀態目錄並授權（不依賴 systemd StateDirectory：容器環境行為不一）
+mkdir -p "$CONF_DIR"
+chown "$SVC_USER:$SVC_USER" "$CONF_DIR"
+chmod 750 "$CONF_DIR"
 
 # ---- 安裝 systemd 服務 ----
 cat > "$SERVICE_FILE" <<'EOF'
@@ -116,7 +126,7 @@ Restart=always
 RestartSec=5
 User=multi-cf-proxy
 Group=multi-cf-proxy
-StateDirectory=multi-cf-proxy
+ReadWritePaths=/var/lib/multi-cf-proxy
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=yes
@@ -133,7 +143,9 @@ sleep 2
 if systemctl is-active --quiet "$SERVICE_NAME"; then
   log "服務已啟動並設為開機自啟"
 else
-  err "服務未正常啟動，請查看日誌：journalctl -u $SERVICE_NAME -e"
+  err "服務未正常啟動，最近日誌："
+  journalctl -u "$SERVICE_NAME" --no-pager -n 8 2>/dev/null || true
+  err "完整日誌：journalctl -u $SERVICE_NAME -e"
   exit 1
 fi
 
