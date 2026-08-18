@@ -115,6 +115,12 @@
   .cred-box .user{color:var(--ok)}
   .modal-foot{display:flex;gap:10px;justify-content:flex-end;margin-top:16px;flex-wrap:wrap}
   .modal-foot .spacer{flex:1}
+  .modal-box.wide{max-width:560px}
+  .tabs{display:flex;gap:6px;margin-bottom:14px;background:#0A101F;border-radius:10px;padding:4px}
+  .tab-btn{flex:1;background:transparent;color:var(--dim);border:none;border-radius:8px;
+    padding:8px 10px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .18s}
+  .tab-btn:hover{color:var(--tx)}
+  .tab-btn.on{background:var(--surface2);color:var(--ok);box-shadow:none}
 
   .conn-heatmap{display:inline-flex;gap:2px;margin-left:6px;vertical-align:1px}
   .conn-heatmap i{width:4px;height:11px;border-radius:1px;background:var(--line-hi)}
@@ -154,15 +160,27 @@
         <div class="sub" id="ports"></div>
       </div>
     </div>
-    <button class="ghost" onclick="logout()">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>登出
-    </button>
+    <div class="actions">
+      <button class="ghost" onclick="openSettings()" aria-label="打開設置" title="打開設置（服務設置與管理員密碼）">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>設置
+      </button>
+      <button class="ghost" onclick="logout()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>登出
+      </button>
+    </div>
   </header>
 
   <div class="stats-strip" id="strip"></div>
 
   <div class="card">
-    <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>WARP 上游</h2>
+    <h2 style="justify-content:space-between">
+      <span style="display:flex;align-items:center;gap:8px">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>WARP 上游
+      </span>
+      <button onclick="openAddUpstream()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;margin-right:4px"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>新增上游
+      </button>
+    </h2>
     <div class="tbl-wrap">
       <table id="upTable"><thead><tr>
         <th>名稱</th><th>狀態</th><th>帳號</th><th>密碼</th><th>重建</th><th>流量 ↑/↓</th><th>操作</th>
@@ -171,27 +189,9 @@
     <div id="upEmpty" class="empty-state" style="display:none">
       <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
       <p>尚無上游。自動註冊一個 WARP 帳號，或貼上 wgcf 配置導入。</p>
-      <button onclick="document.getElementById('regCount').focus()">開始使用</button>
+      <button onclick="openAddUpstream()">新增上游</button>
     </div>
     <div class="hint">每個上游綁定一組帳密，用該帳密連入即走該 WARP 出口；綁定出口不健康時自動切換其他健康出口。</div>
-  </div>
-
-  <div class="grid2">
-    <div class="card">
-      <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>自動註冊 WARP</h2>
-      <div class="row">
-        <div><label for="regCount">數量（1–10）</label><input type="number" id="regCount" value="1" min="1" max="10"></div>
-        <div style="flex:0 0 auto"><button id="btn-reg" onclick="autoReg()">註冊</button></div>
-      </div>
-      <p class="hint">調用 Cloudflare API 自動註冊新 WARP 帳號；被風控時改用手動導入。</p>
-    </div>
-    <div class="card">
-      <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>手動導入配置</h2>
-      <label for="impName">名稱（可留空）</label><input id="impName" placeholder="例如：機場一號">
-      <label for="impConf">wgcf / WireGuard 配置</label>
-      <textarea id="impConf" placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = 172.16.0.2/32&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = engage.cloudflareclient.com:2408"></textarea>
-      <div style="margin-top:12px"><button class="ghost" id="btn-imp" onclick="importConf()">導入</button></div>
-    </div>
   </div>
 
   <div class="card">
@@ -203,28 +203,6 @@
     </div>
     <div id="acctEmpty" class="empty-state" style="display:none">
       <p>尚無流量記錄——有客戶端連入後這裡會顯示每帳號統計。</p>
-    </div>
-  </div>
-
-  <div class="grid2">
-    <div class="card">
-      <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>服務設置</h2>
-      <div class="row">
-        <div><label for="setSocks">SOCKS5 監聽</label><input id="setSocks"></div>
-        <div><label for="setHttp">HTTP 監聽</label><input id="setHttp"></div>
-        <div><label for="setWeb">Web 監聽</label><input id="setWeb"></div>
-      </div>
-      <div class="row">
-        <div><label for="setInterval">健康檢查間隔（秒）</label><input type="number" id="setInterval"></div>
-        <div><label for="setThreshold">失敗閾值（次）</label><input type="number" id="setThreshold"></div>
-      </div>
-      <div style="margin-top:14px"><button class="ghost" id="btn-set" onclick="saveSettings()">保存設置</button></div>
-      <p class="hint">端口與健康參數保存後需重啟服務生效。</p>
-    </div>
-    <div class="card">
-      <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>修改管理員密碼</h2>
-      <label for="newPw">新密碼（≥8 位）</label><input type="password" id="newPw" autocomplete="new-password">
-      <div style="margin-top:14px"><button class="ghost" id="btn-pw" onclick="changePw()">修改密碼</button></div>
     </div>
   </div>
 </div>
@@ -291,11 +269,12 @@ async function copyText(text) {
 
 /* ---------- Modal（取代阻塞式 alert/confirm） ---------- */
 let modalPrevFocus = null;
-function openModal(title, bodyHTML, footHTML) {
+function openModal(title, bodyHTML, footHTML, wide) {
   modalPrevFocus = document.activeElement;
   $('modalTitle').textContent = title;
   $('modalBody').innerHTML = bodyHTML;
   $('modalFoot').innerHTML = footHTML;
+  document.querySelector('.modal-box').classList.toggle('wide', !!wide);
   $('modal').classList.add('open');
   const f = $('modalFoot').querySelector('button');
   if (f) f.focus();
@@ -307,22 +286,40 @@ function closeModal() {
 $('modal').addEventListener('click', e => { if (e.target === $('modal')) closeModal(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('modal').classList.contains('open')) closeModal(); });
 
-/* 帳密展示 modal：生成後唯一一次完整顯示，附一鍵複製 */
+/* 代理連結拼接（憑證已知時直接用） */
+function proxyLink(cred, kind) {
+  const host = location.hostname.includes(':') ? `[${location.hostname}]` : location.hostname;
+  const s = overview?.settings || {};
+  const port = (kind === 'socks' ? s.listen_socks5 : s.listen_http || '').split(':').pop() || (kind === 'socks' ? '1080' : '8080');
+  const auth = encodeURIComponent(cred.username) + ':' + encodeURIComponent(cred.password);
+  return kind === 'socks' ? `socks5h://${auth}@${host}:${port}` : `http://${auth}@${host}:${port}`;
+}
+
+/* 帳密展示 modal：生成後唯一一次完整顯示，附一鍵複製帳密/連結 */
 function showCredentials(list, title) {
   const rows = list.map(x => `
     <div style="margin-bottom:10px">
       <div class="cred-box"><span class="user">${esc(x.username)}</span>:${esc(x.password)}</div>
       <div class="actions" style="justify-content:center">
-        <button class="ghost" data-copy="${esc(x.username)}:${esc(x.password)}">複製帳密</button>
+        <button class="ghost" data-cred-copy="${esc(x.username)}:${esc(x.password)}">複製帳密</button>
+        <button class="ghost" data-cred-user="${esc(x.username)}" data-cred-pass="${esc(x.password)}" data-kind="socks">複製 SOCKS 連結</button>
+        <button class="ghost" data-cred-user="${esc(x.username)}" data-cred-pass="${esc(x.password)}" data-kind="http">複製 HTTP 連結</button>
       </div>
     </div>`).join('');
   openModal(title || '新增帳密', `
     <p class="hint" style="margin:0 0 4px">密碼僅此一次完整顯示，請立即複製保存：</p>
     ${rows}`,
     `<button onclick="closeModal()">我已保存</button>`);
-  $('modalFoot').querySelectorAll('[data-copy]').forEach(b =>
+  $('modalFoot').querySelectorAll('[data-cred-copy]').forEach(b =>
     b.addEventListener('click', async () => {
-      toast(await copyText(b.dataset.copy) ? true : false, await copyText(b.dataset.copy) ? '已複製到剪貼板' : '複製失敗，請手動選取');
+      const ok = await copyText(b.dataset.credCopy);
+      toast(ok, ok ? '已複製到剪貼板' : '複製失敗，請手動選取');
+    }));
+  $('modalFoot').querySelectorAll('[data-kind]').forEach(b =>
+    b.addEventListener('click', async () => {
+      const link = proxyLink({ username: b.dataset.credUser, password: b.dataset.credPass }, b.dataset.kind);
+      const ok = await copyText(link);
+      toast(ok, ok ? `已複製 ${b.dataset.kind === 'socks' ? 'SOCKS5' : 'HTTP'} 連結` : '複製失敗，請重試');
     }));
 }
 
@@ -382,10 +379,6 @@ async function refresh() {
 
   const s = data.settings;
   $('ports').textContent = `SOCKS5 ${s.listen_socks5} · HTTP ${s.listen_http} · Web ${s.listen_web}`;
-  if (document.activeElement !== $('setSocks')) {
-    $('setSocks').value = s.listen_socks5; $('setHttp').value = s.listen_http; $('setWeb').value = s.listen_web;
-    $('setInterval').value = s.health.interval_seconds; $('setThreshold').value = s.health.failure_threshold;
-  }
 
   /* 摘要條 */
   const ups = data.upstreams || [];
@@ -416,7 +409,8 @@ async function refresh() {
       <td>${status}</td>
       <td class="mono">
         ${esc(u.username)}
-        <button class="ghost" style="padding:2px 8px;margin-left:4px;font-size:11px" data-copy="${esc(u.username)}" title="複製用戶名">複製</button>
+        <button class="ghost" style="padding:2px 8px;margin-left:4px;font-size:11px" data-link="socks" data-id="${esc(u.id)}" title="複製 SOCKS5 代理連結">SOCKS</button>
+        <button class="ghost" style="padding:2px 8px;font-size:11px" data-link="http" data-id="${esc(u.id)}" title="複製 HTTP 代理連結">HTTP</button>
       </td>
       <td style="color:var(--faint);font-size:12px">僅生成時顯示</td>
       <td class="num">${u.rebuilds}</td>
@@ -436,9 +430,8 @@ async function refresh() {
       apiCall('DELETE', '/api/upstreams/' + u.id, undefined, '已刪除'), '刪除', true));
     tb.appendChild(tr);
   }
-  tb.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', async () => {
-    toast(await copyText(b.dataset.copy), await copyText(b.dataset.copy) ? '已複製' : '複製失敗');
-  }));
+  /* 一鍵複製代理連結：按需取憑證 → 拼 URL → 剪貼板 */
+  tb.querySelectorAll('[data-link]').forEach(b => b.addEventListener('click', () => copyLink(b.dataset.id, b.dataset.link)));
 
   /* 帳號統計表 */
   const at = $('acctTable').querySelector('tbody'); at.innerHTML = '';
@@ -471,8 +464,76 @@ async function apiCall(method, path, body, okMsg, onResult) {
 }
 
 /* ---------- 業務動作 ---------- */
+
+/* 一鍵複製代理連結：socks5h://user:pass@host:port / http://user:pass@host:port */
+async function copyLink(id, kind) {
+  try {
+    const cred = await api('GET', `/api/upstreams/${id}/credentials`);
+    const ok = await copyText(proxyLink(cred, kind));
+    toast(ok, ok ? `已複製 ${kind === 'socks' ? 'SOCKS5' : 'HTTP'} 連結` : '複製失敗，請重試');
+  } catch (e) { toast(false, e.message); }
+}
+
+/* 新增上游：自動註冊 / 手動導入 收合為單一 modal（兩個分頁） */
+function openAddUpstream() {
+  openModal('新增上游', `
+    <div class="tabs">
+      <button class="tab-btn on" data-tab="auto">自動註冊</button>
+      <button class="tab-btn" data-tab="manual">手動導入</button>
+    </div>
+    <div data-pane="auto">
+      <div class="row">
+        <div><label for="regCount">數量（1–10）</label><input type="number" id="regCount" value="1" min="1" max="10"></div>
+      </div>
+      <p class="hint">調用 Cloudflare API 自動註冊新 WARP 帳號；被風控時請切到「手動導入」。</p>
+    </div>
+    <div data-pane="manual" style="display:none">
+      <label for="impName">名稱（可留空）</label><input id="impName" placeholder="例如：機場一號">
+      <label for="impConf">wgcf / WireGuard 配置</label>
+      <textarea id="impConf" placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = 172.16.0.2/32&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = engage.cloudflareclient.com:2408"></textarea>
+    </div>`,
+    `<button class="ghost" onclick="closeModal()">取消</button>
+     <button id="btn-reg" onclick="autoReg()">自動註冊</button>
+     <button id="btn-imp" style="display:none" onclick="importConf()">導入</button>`, true);
+  /* 分頁切換 */
+  const tabs = [...$('modalBody').querySelectorAll('.tab-btn')];
+  const sync = () => {
+    const cur = tabs.find(t => t.classList.contains('on')).dataset.tab;
+    $('modalBody').querySelector('[data-pane=auto]').style.display = cur === 'auto' ? '' : 'none';
+    $('modalBody').querySelector('[data-pane=manual]').style.display = cur === 'manual' ? '' : 'none';
+    $('btn-reg').style.display = cur === 'auto' ? '' : 'none';
+    $('btn-imp').style.display = cur === 'manual' ? '' : 'none';
+  };
+  tabs.forEach(t => t.addEventListener('click', () => { tabs.forEach(x => x.classList.remove('on')); t.classList.add('on'); sync(); }));
+  sync();
+}
+
+/* 設置：服務設置 + 管理員密碼 收合為單一 modal */
+function openSettings() {
+  const s = overview?.settings || {};
+  openModal('設置', `
+    <label for="setSocks">SOCKS5 監聽</label><input id="setSocks" value="${esc(s.listen_socks5 || ':1080')}">
+    <div class="row">
+      <div><label for="setHttp">HTTP 監聽</label><input id="setHttp" value="${esc(s.listen_http || ':8080')}"></div>
+      <div><label for="setWeb">Web 監聽</label><input id="setWeb" value="${esc(s.listen_web || ':8081')}"></div>
+    </div>
+    <div class="row">
+      <div><label for="setInterval">健康檢查間隔（秒）</label><input type="number" id="setInterval" value="${s.health?.interval_seconds ?? 30}"></div>
+      <div><label for="setThreshold">失敗閾值（次）</label><input type="number" id="setThreshold" value="${s.health?.failure_threshold ?? 3}"></div>
+    </div>
+    <div style="margin-top:14px"><button class="ghost" id="btn-set" onclick="saveSettings()">保存設置</button></div>
+    <p class="hint">端口與健康參數保存後需重啟服務生效。</p>
+    <hr style="border:none;border-top:1px solid var(--line);margin:18px 0 6px">
+    <label for="newPw">修改管理員密碼（新密碼 ≥8 位）</label>
+    <div class="row">
+      <div><input type="password" id="newPw" placeholder="新密碼" autocomplete="new-password"></div>
+      <div style="flex:0 0 auto"><button class="ghost" id="btn-pw" onclick="changePw()">修改密碼</button></div>
+    </div>`,
+    `<button class="ghost" onclick="closeModal()">關閉</button>`, true);
+}
+
 async function autoReg() {
-  const n = parseInt($('regCount').value || '1');
+  const n = parseInt(($('regCount')?.value) || '1');
   const b = $('btn-reg'); btnBusy(b, true);
   try {
     const r = await api('POST', '/api/upstreams/auto', { count: n });
@@ -488,7 +549,6 @@ async function importConf() {
     const r = await api('POST', '/api/upstreams/import', { conf: $('impConf').value, name: $('impName').value });
     toast(true, '已導入');
     showCredentials([r], '導入成功');
-    $('impConf').value = ''; $('impName').value = '';
     refresh();
   } catch (e) { toast(false, e.message); }
   btnBusy(b, false);
@@ -501,6 +561,7 @@ async function saveSettings() {
       health: { interval_seconds: parseInt($('setInterval').value || '30'), failure_threshold: parseInt($('setThreshold').value || '3') },
     });
     toast(true, '已保存（重啟後生效）');
+    closeModal();
   } catch (e) { toast(false, e.message); }
   btnBusy(b, false);
 }

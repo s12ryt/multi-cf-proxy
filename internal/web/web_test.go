@@ -267,6 +267,39 @@ func TestImportInvalidConf(t *testing.T) {
 	}
 }
 
+// TestUpstreamCredentialsEndpoint 按需取憑證（複製連結用）：
+// 需 session；返回該上游帳密；不存在 404；未登入 401。
+func TestUpstreamCredentialsEndpoint(t *testing.T) {
+	e := newTestEnv(t)
+	ck := e.login(t)
+	e.do(t, "POST", "/api/upstreams/auto", map[string]int{"count": 1}, &ck)
+	id := e.cfg.Get().Upstreams[0].ID
+	wantUser := e.cfg.Get().Upstreams[0].Account.Username
+	wantPass := e.cfg.Get().Upstreams[0].Account.Password
+
+	// 未登入 401
+	empty := ""
+	resp, _ := e.do(t, "GET", "/api/upstreams/"+id+"/credentials", nil, &empty)
+	if resp.StatusCode != 401 {
+		t.Fatalf("未登入應 401, got %d", resp.StatusCode)
+	}
+
+	// 正常返回帳密
+	resp, m := e.do(t, "GET", "/api/upstreams/"+id+"/credentials", nil, &ck)
+	if resp.StatusCode != 200 {
+		t.Fatalf("應 200, got %d", resp.StatusCode)
+	}
+	if m["username"] != wantUser || m["password"] != wantPass {
+		t.Errorf("帳密不一致: %v", m)
+	}
+
+	// 不存在 404
+	resp, _ = e.do(t, "GET", "/api/upstreams/nope/credentials", nil, &ck)
+	if resp.StatusCode != 404 {
+		t.Errorf("不存在應 404, got %d", resp.StatusCode)
+	}
+}
+
 func TestUpstreamLifecycle(t *testing.T) {
 	e := newTestEnv(t)
 	ck := e.login(t)

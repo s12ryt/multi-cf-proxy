@@ -65,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/upstreams/auto", s.requireAuth(s.handleAutoRegister))
 	mux.HandleFunc("POST /api/upstreams/import", s.requireAuth(s.handleImport))
 	mux.HandleFunc("PATCH /api/upstreams/{id}", s.requireAuth(s.handlePatchUpstream))
+	mux.HandleFunc("GET /api/upstreams/{id}/credentials", s.requireAuth(s.handleGetCredentials))
 	mux.HandleFunc("POST /api/upstreams/{id}/rebuild", s.requireAuth(s.handleRebuild))
 	mux.HandleFunc("POST /api/upstreams/{id}/credentials", s.requireAuth(s.handleRegenCredentials))
 	mux.HandleFunc("DELETE /api/upstreams/{id}", s.requireAuth(s.handleDeleteUpstream))
@@ -424,6 +425,19 @@ func (s *Server) patchUpstream(id string, enabled bool) error {
 		u.Enabled = enabled
 		return nil
 	})
+}
+
+// handleGetCredentials 按需返回單個上游的帳密（複製代理連結用）。
+// 概覽 API 不常駐暴露密碼，僅此顯式端點按需提供（需 session）。
+func (s *Server) handleGetCredentials(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	c := s.cfg.Get()
+	u, ok := c.UpstreamByID(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "上游不存在"})
+		return
+	}
+	writeJSON(w, http.StatusOK, upstreamView{ID: u.ID, Username: u.Account.Username, Password: u.Account.Password})
 }
 
 func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {

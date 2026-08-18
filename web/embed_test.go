@@ -30,6 +30,13 @@ func TestIndexHTMLContract(t *testing.T) {
 		{"SVG 圖標而非 emoji 圖標", "<svg"},
 		{"系統字體棧（無外鏈字體依賴）", "font-family:system-ui"},
 		{"內嵌 favicon（自足，無 404）", "rel=\"icon\""},
+		// v1.4：一鍵複製代理連結 + 收合式按鈕
+		{"複製 SOCKS 代理連結", "socks5h://"},
+		{"複製 HTTP 代理連結", "http://"},
+		{"上游表帳號欄含 SOCKS/HTTP 複製鈕", "data-link=\"socks\""},
+		{"新增上游收合按鈕（註冊+導入合一）", "新增上游"},
+		{"新增上游 modal 含自動/手動兩個分頁", "tab-btn"},
+		{"設置收合按鈕（設置+改密碼合一）", "打開設置"},
 	}
 	for _, m := range mustContain {
 		if !strings.Contains(html, m.substr) {
