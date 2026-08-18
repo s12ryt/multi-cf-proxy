@@ -1,0 +1,17 @@
+# 構建產出
+dist/
+*.exe
+
+# 本地配置（含帳密，永不入庫）
+config.json
+*.local.json
+
+# 內部開發紀錄
+agent/
+
+# 編輯器/系統
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

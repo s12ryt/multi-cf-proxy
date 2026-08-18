@@ -1,0 +1,20 @@
+[Unit]
+Description=Multi-CF-Proxy (多開CF代理)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/multi-cf-proxy -config /etc/multi-cf-proxy/config.json
+Restart=always
+RestartSec=5
+# 用戶態隧道，無需特權；加固選項
+DynamicUser=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/etc/multi-cf-proxy
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
