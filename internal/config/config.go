@@ -11,8 +11,9 @@ import (
 
 // HealthCheckConfig 健康檢查參數。
 type HealthCheckConfig struct {
-	IntervalSeconds  int `json:"interval_seconds"`
-	FailureThreshold int `json:"failure_threshold"`
+	IntervalSeconds       int     `json:"interval_seconds"`
+	FailureThreshold      int     `json:"failure_threshold"`
+	LatencyDiscardSeconds float64 `json:"latency_discard_seconds"` // 0 = 停用
 }
 
 // Account 綁定在某個上游的入站帳密（用戶名:密碼）。
@@ -97,6 +98,9 @@ func (c *Config) Validate() error {
 	}
 	if c.HealthCheck.FailureThreshold <= 0 {
 		return fmt.Errorf("health_check.failure_threshold 必須大於 0")
+	}
+	if c.HealthCheck.LatencyDiscardSeconds < 0 {
+		return fmt.Errorf("health_check.latency_discard_seconds 不可小於 0")
 	}
 	seen := map[string]bool{}
 	for i, u := range c.Upstreams {

@@ -60,6 +60,7 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 			},
 		},
 	}
+	orig.HealthCheck.LatencyDiscardSeconds = 1.5
 	if err := orig.Save(path); err != nil {
 		t.Fatalf("Save 失敗: %v", err)
 	}
@@ -82,6 +83,9 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 	}
 	if u.Account.Username != "warp-ab12" || u.Account.Password != "pw1234567890abcdef" {
 		t.Errorf("帳號回讀不一致: %+v", u.Account)
+	}
+	if got.HealthCheck.LatencyDiscardSeconds != 1.5 {
+		t.Errorf("延遲丟棄秒數回讀不一致: %v", got.HealthCheck.LatencyDiscardSeconds)
 	}
 }
 
@@ -123,6 +127,10 @@ func TestFillDefaultsKeepsExplicitValues(t *testing.T) {
 	if c.HealthCheck.IntervalSeconds != 30 {
 		t.Errorf("健康檢查空值應補默認: %+v", c.HealthCheck)
 	}
+	// 延遲丟棄 0 = 停用，屬合法值，不應被 FillDefaults 改寫
+	if c.HealthCheck.LatencyDiscardSeconds != 0 {
+		t.Errorf("延遲丟棄默認應為 0（停用）: %v", c.HealthCheck.LatencyDiscardSeconds)
+	}
 }
 
 func TestValidate(t *testing.T) {
@@ -148,6 +156,8 @@ func TestValidate(t *testing.T) {
 			}}
 		}, true},
 		{"健康檢查間隔為零", func(c *Config) { c.HealthCheck.IntervalSeconds = 0 }, true},
+		{"延遲丟棄秒數為負", func(c *Config) { c.HealthCheck.LatencyDiscardSeconds = -0.5 }, true},
+		{"延遲丟棄零表示停用", func(c *Config) { c.HealthCheck.LatencyDiscardSeconds = 0 }, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
