@@ -37,6 +37,11 @@ func TestIndexHTMLContract(t *testing.T) {
 		{"新增上游收合按鈕（註冊+導入合一）", "新增上游"},
 		{"新增上游 modal 含自動/手動兩個分頁", "tab-btn"},
 		{"設置收合按鈕（設置+改密碼合一）", "打開設置"},
+		// v1.5：上游延遲觀察與可選的延遲丟棄門檻
+		{"上游延遲毫秒值", "last_latency_ms"},
+		{"延遲過高丟棄設置鍵", "latency_discard_seconds"},
+		{"延遲過高丟棄設置輸入", "setLatency"},
+		{"延遲欄位", "延遲"},
 	}
 	for _, m := range mustContain {
 		if !strings.Contains(html, m.substr) {

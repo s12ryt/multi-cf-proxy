@@ -183,7 +183,7 @@
     </h2>
     <div class="tbl-wrap">
       <table id="upTable"><thead><tr>
-        <th>名稱</th><th>狀態</th><th>帳號</th><th>密碼</th><th>重建</th><th>流量 ↑/↓</th><th>操作</th>
+        <th>名稱</th><th>狀態</th><th>延遲</th><th>帳號</th><th>密碼</th><th>重建</th><th>流量 ↑/↓</th><th>操作</th>
       </tr></thead><tbody></tbody></table>
     </div>
     <div id="upEmpty" class="empty-state" style="display:none">
@@ -310,12 +310,12 @@ function showCredentials(list, title) {
     <p class="hint" style="margin:0 0 4px">密碼僅此一次完整顯示，請立即複製保存：</p>
     ${rows}`,
     `<button onclick="closeModal()">我已保存</button>`);
-  $('modalFoot').querySelectorAll('[data-cred-copy]').forEach(b =>
+  $('modalBody').querySelectorAll('[data-cred-copy]').forEach(b =>
     b.addEventListener('click', async () => {
       const ok = await copyText(b.dataset.credCopy);
       toast(ok, ok ? '已複製到剪貼板' : '複製失敗，請手動選取');
     }));
-  $('modalFoot').querySelectorAll('[data-kind]').forEach(b =>
+  $('modalBody').querySelectorAll('[data-kind]').forEach(b =>
     b.addEventListener('click', async () => {
       const link = proxyLink({ username: b.dataset.credUser, password: b.dataset.credPass }, b.dataset.kind);
       const ok = await copyText(link);
@@ -403,10 +403,16 @@ async function refresh() {
       : u.healthy
         ? `<span class="dot ok"></span><span class="badge b-ok">健康</span>`
         : `<span class="dot bad"></span><span class="badge b-bad" title="${esc(u.last_error || '探測失敗')}">不健康</span>`;
+    const latency = Number(u.last_latency_ms || 0);
+    const latencyColor = latency <= 300 ? 'var(--ok)' : latency <= 800 ? 'var(--warn)' : 'var(--bad)';
+    const latencyCell = u.enabled && latency > 0
+      ? `<span class="mono" style="color:${latencyColor}">${latency} ms</span>`
+      : '<span style="color:var(--faint)">—</span>';
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td class="mono">${esc(u.name)}</td>
       <td>${status}</td>
+      <td title="最近一次 Cloudflare trace 探測延遲">${latencyCell}</td>
       <td class="mono">
         ${esc(u.username)}
         <button class="ghost" style="padding:2px 8px;margin-left:4px;font-size:11px" data-link="socks" data-id="${esc(u.id)}" title="複製 SOCKS5 代理連結">SOCKS</button>
@@ -520,9 +526,10 @@ function openSettings() {
     <div class="row">
       <div><label for="setInterval">健康檢查間隔（秒）</label><input type="number" id="setInterval" value="${s.health?.interval_seconds ?? 30}"></div>
       <div><label for="setThreshold">失敗閾值（次）</label><input type="number" id="setThreshold" value="${s.health?.failure_threshold ?? 3}"></div>
+      <div><label for="setLatency">延遲過高丟棄（秒，0=停用）</label><input type="number" id="setLatency" min="0" step="0.1" value="${s.health?.latency_discard_seconds ?? 0}"></div>
     </div>
     <div style="margin-top:14px"><button class="ghost" id="btn-set" onclick="saveSettings()">保存設置</button></div>
-    <p class="hint">端口與健康參數保存後需重啟服務生效。</p>
+    <p class="hint">端口與健康參數保存後需重啟服務生效；延遲連續超標會視為探測失敗並重建。</p>
     <hr style="border:none;border-top:1px solid var(--line);margin:18px 0 6px">
     <label for="newPw">修改管理員密碼（新密碼 ≥8 位）</label>
     <div class="row">
@@ -558,7 +565,11 @@ async function saveSettings() {
   try {
     await api('PUT', '/api/settings', {
       listen_socks5: $('setSocks').value, listen_http: $('setHttp').value, listen_web: $('setWeb').value,
-      health: { interval_seconds: parseInt($('setInterval').value || '30'), failure_threshold: parseInt($('setThreshold').value || '3') },
+      health: {
+        interval_seconds: parseInt($('setInterval').value || '30'),
+        failure_threshold: parseInt($('setThreshold').value || '3'),
+        latency_discard_seconds: parseFloat($('setLatency').value || '0'),
+      },
     });
     toast(true, '已保存（重啟後生效）');
     closeModal();
