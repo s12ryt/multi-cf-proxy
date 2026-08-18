@@ -3,6 +3,7 @@ package stats
 
 import (
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,10 +26,19 @@ type AccountStats struct {
 	LastActive  time.Time `json:"last_active"`
 }
 
+// DialStats 撥號延遲分佈快照（最近樣本的 nearest-rank 百分位，毫秒）。
+type DialStats struct {
+	Count int64 `json:"count"`
+	P50MS int64 `json:"p50_ms"`
+	P95MS int64 `json:"p95_ms"`
+	MaxMS int64 `json:"max_ms"`
+}
+
 // Snapshot 統計快照。
 type Snapshot struct {
 	Upstreams map[string]UpstreamStats `json:"upstreams"`
 	Accounts  map[string]AccountStats  `json:"accounts"`
+	Dial      DialStats                `json:"dial"`
 }
 
 type counters struct {
@@ -43,13 +53,63 @@ type Collector struct {
 	mu        sync.Mutex // 保護兩個 map 的建立與替換
 	upstreams map[string]*counters
 	accounts  map[string]*counters
+
+	dialMu      sync.Mutex // 保護撥號延遲環形緩衝
+	dialSamples []int64    // 毫秒樣本（環形，容量 dialSampleCap）
+	dialPos     int        // 環形寫入位置（僅在滿環後使用）
 }
+
+// dialSampleCap 撥號延遲樣本環形容量：保留最近 512 筆，足以反映近期趨勢。
+const dialSampleCap = 512
 
 // NewCollector 建立收集器。
 func NewCollector() *Collector {
 	return &Collector{
 		upstreams: map[string]*counters{},
 		accounts:  map[string]*counters{},
+	}
+}
+
+// RecordDial 記錄一筆成功撥號的耗時（只統計成功路徑，避免失敗污染分佈）。
+func (c *Collector) RecordDial(d time.Duration) {
+	ms := d.Milliseconds()
+	if ms < 0 {
+		ms = 0
+	}
+	c.dialMu.Lock()
+	defer c.dialMu.Unlock()
+	if c.dialSamples == nil {
+		c.dialSamples = make([]int64, 0, dialSampleCap)
+	}
+	if len(c.dialSamples) < dialSampleCap {
+		c.dialSamples = append(c.dialSamples, ms)
+		return
+	}
+	c.dialSamples[c.dialPos] = ms
+	c.dialPos = (c.dialPos + 1) % dialSampleCap
+}
+
+// dialPercentiles 就地樣本計算 nearest-rank 百分位（rank = ceil(p/100·n)，1-based）。
+func dialPercentiles(samples []int64) DialStats {
+	n := len(samples)
+	if n == 0 {
+		return DialStats{}
+	}
+	sorted := make([]int64, n)
+	copy(sorted, samples)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	rank := func(p int) int64 {
+		r := (p*n + 99) / 100 // ceil(p*n/100)
+		if r < 1 {
+			r = 1
+		}
+		return sorted[r-1]
+	}
+	return DialStats{
+		Count: int64(n),
+		P50MS: rank(50),
+		P95MS: rank(95),
+		MaxMS: sorted[n-1],
 	}
 }
 
@@ -127,7 +187,10 @@ func (c *Collector) Snapshot() Snapshot {
 		}
 	}
 	c.mu.Unlock()
-	return Snapshot{Upstreams: ups, Accounts: accs}
+	c.dialMu.Lock()
+	dial := dialPercentiles(c.dialSamples)
+	c.dialMu.Unlock()
+	return Snapshot{Upstreams: ups, Accounts: accs, Dial: dial}
 }
 
 type accKind int

@@ -153,3 +153,69 @@ func TestConcurrentAccess(t *testing.T) {
 		t.Errorf("併發後活躍連接應為 0: %d", got)
 	}
 }
+
+// --- v1.6 Round 1：撥號延遲量測 ---
+
+// TestDialLatencyPercentiles 記錄 1..100ms 各一筆，nearest-rank p50/p95 應為 50/95ms。
+func TestDialLatencyPercentiles(t *testing.T) {
+	c := NewCollector()
+	for i := 1; i <= 100; i++ {
+		c.RecordDial(time.Duration(i) * time.Millisecond)
+	}
+	d := c.Snapshot().Dial
+	if d.Count != 100 {
+		t.Fatalf("Count = %d, want 100", d.Count)
+	}
+	if d.P50MS != 50 {
+		t.Errorf("P50MS = %d, want 50", d.P50MS)
+	}
+	if d.P95MS != 95 {
+		t.Errorf("P95MS = %d, want 95", d.P95MS)
+	}
+	if d.MaxMS != 100 {
+		t.Errorf("MaxMS = %d, want 100", d.MaxMS)
+	}
+}
+
+// TestDialLatencyEmpty 無樣本時 Count=0 且百分位為 0。
+func TestDialLatencyEmpty(t *testing.T) {
+	d := NewCollector().Snapshot().Dial
+	if d.Count != 0 || d.P50MS != 0 || d.P95MS != 0 || d.MaxMS != 0 {
+		t.Errorf("空快照應全零, got %+v", d)
+	}
+}
+
+// TestDialLatencyRingBound 樣本環形有界：僅保留最近 N 筆。
+func TestDialLatencyRingBound(t *testing.T) {
+	c := NewCollector()
+	for i := 1; i <= 600; i++ {
+		c.RecordDial(time.Duration(i) * time.Millisecond)
+	}
+	d := c.Snapshot().Dial
+	if d.Count > dialSampleCap {
+		t.Fatalf("Count = %d 超出環形上限 %d", d.Count, dialSampleCap)
+	}
+	// 保留最後 512 筆（89..600ms）：最大值必為 600ms
+	if d.MaxMS != 600 {
+		t.Errorf("MaxMS = %d, want 600（最新樣本必須在環內）", d.MaxMS)
+	}
+}
+
+// TestDialLatencyConcurrent 併發記錄不丟樣本、不崩潰。
+func TestDialLatencyConcurrent(t *testing.T) {
+	c := NewCollector()
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				c.RecordDial(time.Duration(i) * time.Millisecond)
+			}
+		}(g)
+	}
+	wg.Wait()
+	if got := c.Snapshot().Dial.Count; got != 400 {
+		t.Errorf("Count = %d, want 400（併發不丟樣本）", got)
+	}
+}
