@@ -8,13 +8,15 @@ Type=simple
 ExecStart=/usr/local/bin/multi-cf-proxy -config /var/lib/multi-cf-proxy/config.json
 Restart=always
 RestartSec=5
-# 用戶態隧道，無需特權；DynamicUser 搭配 StateDirectory（systemd 自動建目錄並授權）
-DynamicUser=yes
+# 專用靜態系統帳戶（install.sh 創建）。DynamicUser 在部分容器化 VPS 上
+# 會導致 exec EACCES（203/EXEC），故不使用。
+User=multi-cf-proxy
+Group=multi-cf-proxy
 StateDirectory=multi-cf-proxy
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=yes
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target

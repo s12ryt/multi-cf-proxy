@@ -4,15 +4,17 @@
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/s12ryt/multi-cf-proxy/main/deploy/install.sh | sudo bash
-#   指定版本：curl -fsSL ... | sudo VERSION=v1.0.0 bash
+#   指定版本：curl -fsSL ... | sudo VERSION=v1.1.1 bash
 #   解除安裝：curl -fsSL ... | sudo bash -s -- --uninstall
 set -eu
 
 REPO="s12ryt/multi-cf-proxy"
 BIN="/usr/local/bin/multi-cf-proxy"
 CONF_DIR="/var/lib/multi-cf-proxy"
+PRIVATE_CONF_DIR="/var/lib/private/multi-cf-proxy"
 SERVICE_FILE="/etc/systemd/system/multi-cf-proxy.service"
 SERVICE_NAME="multi-cf-proxy"
+SVC_USER="multi-cf-proxy"
 VERSION="${VERSION:-}"
 
 GREEN='\033[1;32m'; RED='\033[1;31m'; YELLOW='\033[1;33m'; OFF='\033[0m'
@@ -26,6 +28,9 @@ if [ "${1:-}" = "--uninstall" ]; then
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
   rm -f "$SERVICE_FILE" "$BIN"
   systemctl daemon-reload 2>/dev/null || true
+  if id "$SVC_USER" >/dev/null 2>&1; then
+    userdel "$SVC_USER" 2>/dev/null || warn "無法刪除帳號 $SVC_USER（可能仍有進程佔用）"
+  fi
   log "已解除安裝。配置目錄 $CONF_DIR（含帳密）保留，如確認不再使用請手動刪除："
   echo "  rm -rf $CONF_DIR"
   exit 0
@@ -42,6 +47,10 @@ esac
 
 command -v systemctl >/dev/null 2>&1 || { err "此系統無 systemd，請改用 Docker 方式部署（見 README）"; exit 1; }
 command -v curl >/dev/null 2>&1 || { err "缺少 curl，請先安裝（apt/yum install curl）"; exit 1; }
+command -v useradd >/dev/null 2>&1 || { err "缺少 useradd；請改用 Docker 方式部署（見 README）"; exit 1; }
+
+# 覆蓋安裝：先停掉可能在重啟循環中的舊服務
+systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
 
 # ---- 解析版本（默認最新 release）----
 if [ -z "$VERSION" ]; then
@@ -68,9 +77,30 @@ else
   warn "無法下載 checksums.txt，跳過校驗"
 fi
 
+# ---- 建立專用系統帳戶（不使用 DynamicUser：部分容器化 VPS 會 exec EACCES）----
+if id "$SVC_USER" >/dev/null 2>&1; then
+  log "系統帳號 $SVC_USER 已存在，沿用"
+else
+  useradd --system --home-dir "$CONF_DIR" --shell /usr/sbin/nologin --no-create-home "$SVC_USER"
+  log "已建立系統帳號 $SVC_USER"
+fi
+
 # ---- 安裝二進制 ----
 install -m 0755 "$TMP/$ASSET" "$BIN"
-mkdir -p "$CONF_DIR"
+
+# ---- 執行權診斷（126 = 無法執行：多半是 noexec 掛載）----
+EXEC_RC=0
+runuser -u "$SVC_USER" -- "$BIN" -h >/dev/null 2>&1 || EXEC_RC=$?
+if [ "$EXEC_RC" = "126" ]; then
+  err "帳號 $SVC_USER 無法執行 $BIN（noexec 掛載？），請檢查：mount | grep noexec"
+  err "或改用 Docker 部署（見 README）"
+  exit 1
+fi
+
+# 清理 DynamicUser 時代遷移到 /var/lib/private 的殘留（若服務此前從未成功啟動、無配置）
+if [ -d "$PRIVATE_CONF_DIR" ] && [ ! -e "$CONF_DIR/config.json" ] && [ ! -e "$PRIVATE_CONF_DIR/config.json" ]; then
+  rm -rf "$PRIVATE_CONF_DIR" 2>/dev/null || true
+fi
 
 # ---- 安裝 systemd 服務 ----
 cat > "$SERVICE_FILE" <<'EOF'
@@ -84,12 +114,13 @@ Type=simple
 ExecStart=/usr/local/bin/multi-cf-proxy -config /var/lib/multi-cf-proxy/config.json
 Restart=always
 RestartSec=5
-DynamicUser=yes
+User=multi-cf-proxy
+Group=multi-cf-proxy
 StateDirectory=multi-cf-proxy
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=yes
-AmbientCapabilities=CAP_NET_BIND_SERVICE
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target
