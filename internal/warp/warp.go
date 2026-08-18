@@ -156,6 +156,13 @@ func NewClient(opts ...Option) *Client {
 	return c
 }
 
+// v6v4Addresses 真實 CF API 的 addresses 欄位格式（wgcf openapi spec）：
+// 物件 {"v4": "<裸IP>", "v6": "<裸IP>"}，生成配置時補 /32 與 /128。
+type v6v4Addresses struct {
+	V4 string `json:"v4"`
+	V6 string `json:"v6"`
+}
+
 type regResponse struct {
 	ID      string `json:"id"`
 	Token   string `json:"token"`
@@ -165,7 +172,7 @@ type regResponse struct {
 	Config struct {
 		ClientID  string `json:"client_id"`
 		Interface struct {
-			Addresses []string `json:"addresses"`
+			Addresses v6v4Addresses `json:"addresses"`
 		} `json:"interface"`
 		Peers []struct {
 			PublicKey string `json:"public_key"`
@@ -250,7 +257,15 @@ func (c *Client) Register(ctx context.Context) (Conf, error) {
 	if len(full.Config.Peers) == 0 || full.Config.Peers[0].PublicKey == "" {
 		return Conf{}, fmt.Errorf("WARP 配置缺少對端公鑰")
 	}
-	if len(full.Config.Interface.Addresses) == 0 {
+	// 裸 IP 補前綴長度（與 wgcf 生成行為一致：v4/32、v6/128）
+	var addrs []string
+	if v4 := full.Config.Interface.Addresses.V4; v4 != "" {
+		addrs = append(addrs, v4+"/32")
+	}
+	if v6 := full.Config.Interface.Addresses.V6; v6 != "" {
+		addrs = append(addrs, v6+"/128")
+	}
+	if len(addrs) == 0 {
 		return Conf{}, fmt.Errorf("WARP 配置缺少隧道地址")
 	}
 
@@ -258,7 +273,7 @@ func (c *Client) Register(ctx context.Context) (Conf, error) {
 		PrivateKey:    priv,
 		PeerPublicKey: full.Config.Peers[0].PublicKey,
 		Endpoint:      DefaultEndpoint,
-		Addresses:     full.Config.Interface.Addresses,
+		Addresses:     addrs,
 	}, nil
 }
 
