@@ -3,118 +3,246 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>多開CF代理 · 管理界面</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2322C55E' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'/%3E%3C/svg%3E">
 <style>
-  :root{--bg:#0f1420;--card:#171e2e;--line:#28324a;--tx:#e6ebf5;--dim:#8b97ad;--ok:#34d399;--bad:#f87171;--warn:#fbbf24;--acc:#60a5fa}
+  /* 設計系統：Dark OLED（ui-ux-pro-max）——無外鏈依賴，系統字體棧 */
+  :root{
+    --bg:#020617; --surface:#0F172A; --surface2:#1E293B;
+    --line:#243050; --line-hi:#334166;
+    --tx:#F8FAFC; --dim:#94A3B8; --faint:#7C8CA6;
+    --ok:#22C55E; --ok-dim:rgba(34,197,94,.14);
+    --bad:#F87171; --bad-dim:rgba(248,113,113,.14);
+    --warn:#FBBF24; --cta:#22C55E; --cta-hi:#16A34A;
+    --mono:ui-monospace,'Cascadia Code',Consolas,'Courier New',monospace;
+  }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:system-ui,-apple-system,"Microsoft JhengHei",sans-serif;background:var(--bg);color:var(--tx);min-height:100vh}
-  .wrap{max-width:1080px;margin:0 auto;padding:24px 16px 60px}
-  h1{font-size:20px;margin-bottom:4px} h1 span{color:var(--acc)}
-  .sub{color:var(--dim);font-size:13px;margin-bottom:20px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
-  .card h2{font-size:15px;margin-bottom:12px;color:var(--acc)}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
-  th{color:var(--dim);font-weight:500}
-  tr:last-child td{border-bottom:none}
+  html{scrollbar-gutter:stable}
+  body{font-family:system-ui,-apple-system,'Segoe UI','Microsoft JhengHei',sans-serif;
+    background:var(--bg);color:var(--tx);min-height:100vh;font-size:14px;line-height:1.55}
+  ::selection{background:rgba(34,197,94,.3)}
+  :focus-visible{outline:2px solid var(--ok);outline-offset:2px;border-radius:6px}
+
+  .wrap{max-width:1120px;margin:0 auto;padding:24px 16px 72px}
+  header.top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:20px}
+  .brand{display:flex;gap:12px;align-items:center}
+  .brand .logo{width:40px;height:40px;border-radius:10px;background:var(--surface2);
+    display:flex;align-items:center;justify-content:center;color:var(--ok);flex:none;
+    box-shadow:0 0 18px rgba(34,197,94,.15)}
+  .brand h1{font-size:17px;font-weight:700;letter-spacing:.2px}
+  .brand .sub{color:var(--dim);font-size:12px;font-family:var(--mono)}
+
+  /* 摘要條 */
+  .stats-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+  .stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
+  .stat .k{color:var(--dim);font-size:11px;letter-spacing:.6px;text-transform:uppercase}
+  .stat .v{font-size:22px;font-weight:700;font-family:var(--mono);margin-top:2px}
+  .stat .v .unit{font-size:12px;color:var(--faint);font-weight:400;margin-left:2px}
+  .stat.ok .v{color:var(--ok)} .stat.bad .v{color:var(--bad)}
+
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px}
+  .card h2{font-size:14px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px;color:var(--tx)}
+  .card h2 svg{color:var(--ok)}
+  .hint{font-size:12px;color:var(--faint);margin-top:10px}
+
+  .tbl-wrap{overflow-x:auto;border-radius:8px}
+  table{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
+  th,td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle;white-space:nowrap}
+  th{color:var(--faint);font-weight:500;font-size:12px;letter-spacing:.4px}
+  tbody tr{transition:background .15s}
+  tbody tr:hover{background:rgba(148,163,184,.05)}
+  tbody tr:last-child td{border-bottom:none}
+  .mono{font-family:var(--mono);font-size:12.5px}
+  .num{color:var(--warn);font-family:var(--mono)}
+
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px}
+  .dot.ok{background:var(--ok);box-shadow:0 0 8px rgba(34,197,94,.7);animation:pulse 2.4s ease-in-out infinite}
+  .dot.bad{background:var(--bad)} .dot.off{background:var(--faint)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
   .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px}
-  .b-ok{background:rgba(52,211,153,.15);color:var(--ok)} .b-bad{background:rgba(248,113,113,.15);color:var(--bad)}
-  .b-off{background:rgba(139,151,173,.15);color:var(--dim)}
-  button{background:var(--acc);color:#0b1220;border:none;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer;font-weight:600}
-  button.ghost{background:transparent;color:var(--acc);border:1px solid var(--acc)}
-  button.danger{background:transparent;color:var(--bad);border:1px solid var(--bad)}
-  button:disabled{opacity:.5;cursor:default}
-  input,textarea,select{background:#0d1320;border:1px solid var(--line);border-radius:8px;color:var(--tx);padding:8px 10px;font-size:13px;width:100%}
-  textarea{font-family:ui-monospace,Consolas,monospace;min-height:110px;resize:vertical}
-  label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
+  .b-ok{background:var(--ok-dim);color:var(--ok)} .b-bad{background:var(--bad-dim);color:var(--bad)}
+  .b-off{background:rgba(100,116,139,.18);color:var(--dim)}
+
+  button{background:var(--cta);color:#04150a;border:none;border-radius:9px;padding:8px 15px;
+    font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;
+    transition:background .18s,opacity .18s,box-shadow .18s}
+  button:hover{background:var(--cta-hi);box-shadow:0 0 14px rgba(34,197,94,.25)}
+  button:disabled{opacity:.55;cursor:not-allowed;box-shadow:none}
+  button.ghost{background:transparent;color:var(--tx);border:1px solid var(--line-hi)}
+  button.ghost:hover{background:var(--surface2);box-shadow:none;color:var(--tx)}
+  button.danger{background:transparent;color:var(--bad);border:1px solid rgba(248,113,113,.4)}
+  button.danger:hover{background:var(--bad-dim);box-shadow:none}
+  button.loading{pointer-events:none;opacity:.6}
+  button.loading::after{content:'';display:inline-block;width:12px;height:12px;margin-left:8px;
+    border:2px solid currentColor;border-right-color:transparent;border-radius:50%;
+    animation:spin .7s linear infinite;vertical-align:-2px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  input,textarea{background:#0A101F;border:1px solid var(--line);border-radius:9px;color:var(--tx);
+    padding:9px 12px;font-size:13px;width:100%;font-family:inherit;transition:border-color .18s}
+  input:focus,textarea:focus{outline:none;border-color:var(--ok)}
+  textarea{font-family:var(--mono);min-height:118px;resize:vertical}
+  label{display:block;font-size:12px;color:var(--dim);margin:12px 0 5px}
+
   .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
   .row>div{flex:1;min-width:130px}
   .actions{display:flex;gap:6px;flex-wrap:wrap}
-  .mono{font-family:ui-monospace,Consolas,monospace}
-  #login{max-width:360px;margin:14vh auto 0}
-  #msg{position:fixed;top:14px;right:14px;padding:10px 16px;border-radius:10px;font-size:13px;display:none;z-index:9}
-  .m-ok{background:#123a2c;color:var(--ok);display:block!important}
-  .m-err{background:#3a1518;color:var(--bad);display:block!important}
-  .hint{font-size:12px;color:var(--dim);margin-top:6px}
-  .head{display:flex;justify-content:space-between;align-items:center}
-  .num{color:var(--warn)}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-  @media(max-width:800px){.grid2{grid-template-columns:1fr}}
+  @media(max-width:820px){.grid2{grid-template-columns:1fr}.stats-strip{grid-template-columns:1fr 1fr}}
+
+  .empty-state{padding:34px 16px;text-align:center;color:var(--dim)}
+  .empty-state svg{color:var(--faint);margin-bottom:10px}
+  .empty-state p{font-size:13px;margin-bottom:14px}
+
+  #login{max-width:380px;margin:16vh auto 0}
+  #msg{position:fixed;top:16px;right:16px;z-index:100;display:flex;flex-direction:column;gap:8px;max-width:340px}
+  .toast{padding:11px 16px;border-radius:10px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.5);
+    animation:slide .25s ease;display:flex;align-items:center;gap:8px}
+  .toast.ok{background:#0b2b1c;color:var(--ok);border:1px solid rgba(34,197,94,.35)}
+  .toast.err{background:#331418;color:var(--bad);border:1px solid rgba(248,113,113,.35)}
+  @keyframes slide{from{transform:translateX(24px);opacity:0}to{transform:none;opacity:1}}
+
+  #modal{position:fixed;inset:0;background:rgba(2,6,23,.75);backdrop-filter:blur(4px);
+    display:none;align-items:center;justify-content:center;z-index:90;padding:16px}
+  #modal.open{display:flex}
+  .modal-box{background:var(--surface);border:1px solid var(--line-hi);border-radius:16px;
+    width:100%;max-width:460px;padding:22px;box-shadow:0 24px 60px rgba(0,0,0,.6);animation:rise .2s ease}
+  @keyframes rise{from{transform:translateY(12px);opacity:0}to{transform:none;opacity:1}}
+  .modal-box h3{font-size:15px;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+  .cred-box{background:#0A101F;border:1px dashed var(--line-hi);border-radius:10px;
+    padding:14px;font-family:var(--mono);font-size:15px;text-align:center;word-break:all;margin:12px 0;user-select:all}
+  .cred-box .user{color:var(--ok)}
+  .modal-foot{display:flex;gap:10px;justify-content:flex-end;margin-top:16px;flex-wrap:wrap}
+  .modal-foot .spacer{flex:1}
+
+  .conn-heatmap{display:inline-flex;gap:2px;margin-left:6px;vertical-align:1px}
+  .conn-heatmap i{width:4px;height:11px;border-radius:1px;background:var(--line-hi)}
+  .conn-heatmap i.on{background:var(--ok)}
+
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{animation:none!important;transition:none!important}
+  }
 </style>
 </head>
 <body>
-<div id="msg"></div>
+
+<div id="msg" aria-live="polite" role="status"></div>
 
 <!-- 登入 -->
 <div id="login" class="card">
-  <h1>多開<span>CF</span>代理</h1>
-  <p class="sub">請輸入管理員密碼</p>
-  <input type="password" id="pw" placeholder="管理員密碼" autofocus>
-  <div style="margin-top:12px"><button style="width:100%" onclick="login()">登 入</button></div>
+  <div class="brand" style="margin-bottom:14px">
+    <div class="logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    </div>
+    <div><h1>多開CF代理</h1><div class="sub">管理界面</div></div>
+  </div>
+  <label for="pw">管理員密碼</label>
+  <input type="password" id="pw" autocomplete="current-password" autofocus>
+  <div style="margin-top:14px"><button style="width:100%" id="btn-login" onclick="login()">登 入</button></div>
 </div>
 
 <!-- 主界面 -->
 <div id="main" class="wrap" style="display:none">
-  <div class="head">
-    <div><h1>多開<span>CF</span>代理</h1><p class="sub" id="ports"></p></div>
-    <button class="ghost" onclick="logout()">登出</button>
-  </div>
+  <header class="top">
+    <div class="brand">
+      <div class="logo">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </div>
+      <div>
+        <h1>多開CF代理</h1>
+        <div class="sub" id="ports"></div>
+      </div>
+    </div>
+    <button class="ghost" onclick="logout()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>登出
+    </button>
+  </header>
+
+  <div class="stats-strip" id="strip"></div>
 
   <div class="card">
-    <h2>WARP 上游</h2>
-    <table id="upTable"><thead><tr>
-      <th>名稱</th><th>狀態</th><th>帳號</th><th>密碼</th><th>重建次數</th><th>流量 ↑/↓</th><th>操作</th>
-    </tr></thead><tbody></tbody></table>
-    <div class="hint">每個上游自動綁定一組帳密：用該帳密連入即走該 WARP 出口；綁定出口不健康時自動切換其他健康出口。</div>
+    <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>WARP 上游</h2>
+    <div class="tbl-wrap">
+      <table id="upTable"><thead><tr>
+        <th>名稱</th><th>狀態</th><th>帳號</th><th>密碼</th><th>重建</th><th>流量 ↑/↓</th><th>操作</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+    <div id="upEmpty" class="empty-state" style="display:none">
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <p>尚無上游。自動註冊一個 WARP 帳號，或貼上 wgcf 配置導入。</p>
+      <button onclick="document.getElementById('regCount').focus()">開始使用</button>
+    </div>
+    <div class="hint">每個上游綁定一組帳密，用該帳密連入即走該 WARP 出口；綁定出口不健康時自動切換其他健康出口。</div>
   </div>
 
   <div class="grid2">
     <div class="card">
-      <h2>自動註冊 WARP</h2>
+      <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>自動註冊 WARP</h2>
       <div class="row">
-        <div><label>數量（1–10）</label><input type="number" id="regCount" value="1" min="1" max="10"></div>
-        <div style="flex:0"><button onclick="autoReg()">註冊</button></div>
+        <div><label for="regCount">數量（1–10）</label><input type="number" id="regCount" value="1" min="1" max="10"></div>
+        <div style="flex:0 0 auto"><button id="btn-reg" onclick="autoReg()">註冊</button></div>
       </div>
-      <p class="hint">調用 Cloudflare API 自動註冊新 WARP 帳號（被風控時請改用手動導入）。</p>
+      <p class="hint">調用 Cloudflare API 自動註冊新 WARP 帳號；被風控時改用手動導入。</p>
     </div>
     <div class="card">
-      <h2>手動導入配置</h2>
-      <label>名稱（可留空）</label><input id="impName" placeholder="例如：機場一號">
-      <label>wgcf / WireGuard 配置</label><textarea id="impConf" placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = 172.16.0.2/32&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = engage.cloudflareclient.com:2408"></textarea>
-      <div style="margin-top:10px"><button onclick="importConf()">導入</button></div>
+      <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>手動導入配置</h2>
+      <label for="impName">名稱（可留空）</label><input id="impName" placeholder="例如：機場一號">
+      <label for="impConf">wgcf / WireGuard 配置</label>
+      <textarea id="impConf" placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = 172.16.0.2/32&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = engage.cloudflareclient.com:2408"></textarea>
+      <div style="margin-top:12px"><button class="ghost" id="btn-imp" onclick="importConf()">導入</button></div>
     </div>
   </div>
 
   <div class="card">
-    <h2>帳號流量統計</h2>
-    <table id="acctTable"><thead><tr>
-      <th>帳號</th><th>出口</th><th>當前連接</th><th>累計連接</th><th>上行</th><th>下行</th><th>最近活躍</th>
-    </tr></thead><tbody></tbody></table>
+    <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>帳號流量統計</h2>
+    <div class="tbl-wrap">
+      <table id="acctTable"><thead><tr>
+        <th>帳號</th><th>出口</th><th>當前連接</th><th>累計</th><th>上行</th><th>下行</th><th>最近活躍</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+    <div id="acctEmpty" class="empty-state" style="display:none">
+      <p>尚無流量記錄——有客戶端連入後這裡會顯示每帳號統計。</p>
+    </div>
   </div>
 
   <div class="grid2">
     <div class="card">
-      <h2>服務設置</h2>
-      <label>SOCKS5 監聽</label><input id="setSocks">
-      <label>HTTP 監聽</label><input id="setHttp">
-      <label>Web 監聽</label><input id="setWeb">
+      <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>服務設置</h2>
       <div class="row">
-        <div><label>健康檢查間隔（秒）</label><input type="number" id="setInterval"></div>
-        <div><label>失敗閾值（次）</label><input type="number" id="setThreshold"></div>
+        <div><label for="setSocks">SOCKS5 監聽</label><input id="setSocks"></div>
+        <div><label for="setHttp">HTTP 監聽</label><input id="setHttp"></div>
+        <div><label for="setWeb">Web 監聽</label><input id="setWeb"></div>
       </div>
-      <div style="margin-top:12px"><button onclick="saveSettings()">保存設置</button></div>
+      <div class="row">
+        <div><label for="setInterval">健康檢查間隔（秒）</label><input type="number" id="setInterval"></div>
+        <div><label for="setThreshold">失敗閾值（次）</label><input type="number" id="setThreshold"></div>
+      </div>
+      <div style="margin-top:14px"><button class="ghost" id="btn-set" onclick="saveSettings()">保存設置</button></div>
       <p class="hint">端口與健康參數保存後需重啟服務生效。</p>
     </div>
     <div class="card">
-      <h2>修改管理員密碼</h2>
-      <label>新密碼（≥8 位）</label><input type="password" id="newPw">
-      <div style="margin-top:12px"><button onclick="changePw()">修改密碼</button></div>
+      <h2><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>修改管理員密碼</h2>
+      <label for="newPw">新密碼（≥8 位）</label><input type="password" id="newPw" autocomplete="new-password">
+      <div style="margin-top:14px"><button class="ghost" id="btn-pw" onclick="changePw()">修改密碼</button></div>
     </div>
   </div>
 </div>
 
+<!-- 通用 modal（帳密展示 / 確認對話） -->
+<div id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div class="modal-box">
+    <h3 id="modalTitle"></h3>
+    <div id="modalBody"></div>
+    <div class="modal-foot" id="modalFoot"></div>
+  </div>
+</div>
+
 <script>
+'use strict';
 const $ = id => document.getElementById(id);
+
+/* ---------- 通用工具 ---------- */
 const fmt = b => {
   if (b === undefined || b === null) return '—';
   const u = ['B','KB','MB','GB','TB']; let i = 0;
@@ -122,10 +250,91 @@ const fmt = b => {
   return b.toFixed(i ? 1 : 0) + ' ' + u[i];
 };
 const esc = s => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; };
+const ago = iso => {
+  if (!iso || iso === '0001-01-01T00:00:00Z') return '—';
+  const s = (Date.now() - new Date(iso)) / 1000;
+  if (s < 90) return '剛剛';
+  if (s < 3600) return Math.round(s / 60) + ' 分鐘前';
+  if (s < 86400) return Math.round(s / 3600) + ' 小時前';
+  return new Date(iso).toLocaleString();
+};
+
 function toast(ok, text) {
-  const m = $('msg'); m.textContent = text; m.className = ok ? 'm-ok' : 'm-err';
-  setTimeout(() => m.className = '', 3500);
+  const t = document.createElement('div');
+  t.className = 'toast ' + (ok ? 'ok' : 'err');
+  t.textContent = text;
+  $('msg').appendChild(t);
+  setTimeout(() => t.remove(), 3800);
 }
+
+/* 按鈕 busy 態：請求期間禁用 + spinner（UX: 提交反饋 High） */
+function btnBusy(btn, on) {
+  if (!btn) return;
+  btn.classList.toggle('loading', on);
+  btn.disabled = on;
+}
+
+/* 複製到剪貼板（含舊瀏覽器 fallback） */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); ta.remove();
+    }
+    return true;
+  } catch (e) { return false; }
+}
+
+/* ---------- Modal（取代阻塞式 alert/confirm） ---------- */
+let modalPrevFocus = null;
+function openModal(title, bodyHTML, footHTML) {
+  modalPrevFocus = document.activeElement;
+  $('modalTitle').textContent = title;
+  $('modalBody').innerHTML = bodyHTML;
+  $('modalFoot').innerHTML = footHTML;
+  $('modal').classList.add('open');
+  const f = $('modalFoot').querySelector('button');
+  if (f) f.focus();
+}
+function closeModal() {
+  $('modal').classList.remove('open');
+  if (modalPrevFocus && modalPrevFocus.focus) modalPrevFocus.focus();
+}
+$('modal').addEventListener('click', e => { if (e.target === $('modal')) closeModal(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('modal').classList.contains('open')) closeModal(); });
+
+/* 帳密展示 modal：生成後唯一一次完整顯示，附一鍵複製 */
+function showCredentials(list, title) {
+  const rows = list.map(x => `
+    <div style="margin-bottom:10px">
+      <div class="cred-box"><span class="user">${esc(x.username)}</span>:${esc(x.password)}</div>
+      <div class="actions" style="justify-content:center">
+        <button class="ghost" data-copy="${esc(x.username)}:${esc(x.password)}">複製帳密</button>
+      </div>
+    </div>`).join('');
+  openModal(title || '新增帳密', `
+    <p class="hint" style="margin:0 0 4px">密碼僅此一次完整顯示，請立即複製保存：</p>
+    ${rows}`,
+    `<button onclick="closeModal()">我已保存</button>`);
+  $('modalFoot').querySelectorAll('[data-copy]').forEach(b =>
+    b.addEventListener('click', async () => {
+      toast(await copyText(b.dataset.copy) ? true : false, await copyText(b.dataset.copy) ? '已複製到剪貼板' : '複製失敗，請手動選取');
+    }));
+}
+
+/* 確認對話 modal（取代原生 confirm） */
+function confirmBox(title, text, onOk, okLabel, danger) {
+  openModal(title, `<p style="font-size:13px;color:var(--dim)">${esc(text)}</p>`,
+    `<button class="ghost" onclick="closeModal()">取消</button>
+     <button class="${danger ? 'danger' : ''}" id="cfOk">${esc(okLabel || '確定')}</button>`);
+  $('cfOk').addEventListener('click', () => { closeModal(); onOk(); });
+}
+
+/* ---------- API ---------- */
 async function api(method, path, body) {
   const opt = { method, headers: {} };
   if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
@@ -135,95 +344,157 @@ async function api(method, path, body) {
   if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
   return data;
 }
-function showLogin() { $('login').style.display = ''; $('main').style.display = 'none'; }
+
+function showLogin() { $('login').style.display = ''; $('main').style.display = 'none'; stopPolling(); }
+let pollTimer = null;
+function startPolling() { stopPolling(); pollTimer = setInterval(refresh, 5000); }
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+/* 頁面不可見時暫停輪詢（省資源），回到前台立即刷新 */
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopPolling();
+  else if ($('main').style.display !== 'none') { refresh(); startPolling(); }
+});
+
 async function afterLogin() {
   $('login').style.display = 'none'; $('main').style.display = '';
-  await refresh(); setInterval(refresh, 5000);
+  await refresh(); startPolling();
 }
 async function login() {
+  const b = $('btn-login'); btnBusy(b, true);
   try {
     await api('POST', '/api/login', { password: $('pw').value });
     $('pw').value = ''; await afterLogin();
   } catch (e) { toast(false, e.message); }
+  btnBusy(b, false);
 }
-async function logout() { try { await api('POST', '/api/logout'); } catch(e){} showLogin(); }
+async function logout() { try { await api('POST', '/api/logout'); } catch (e) {} showLogin(); }
 $('pw').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 
-let overview = null;
+/* ---------- 渲染（JSON diff：資料不變不重繪，避免閃爍/打斷選取） ---------- */
+let overview = null, lastJSON = '';
 async function refresh() {
-  try { overview = await api('GET', '/api/overview'); } catch (e) { return; }
-  const s = overview.settings;
+  let data;
+  try { data = await api('GET', '/api/overview'); } catch (e) { return; }
+  const j = JSON.stringify(data);
+  if (j === lastJSON) return;
+  lastJSON = j;
+  overview = data;
+
+  const s = data.settings;
   $('ports').textContent = `SOCKS5 ${s.listen_socks5} · HTTP ${s.listen_http} · Web ${s.listen_web}`;
   if (document.activeElement !== $('setSocks')) {
     $('setSocks').value = s.listen_socks5; $('setHttp').value = s.listen_http; $('setWeb').value = s.listen_web;
     $('setInterval').value = s.health.interval_seconds; $('setThreshold').value = s.health.failure_threshold;
   }
+
+  /* 摘要條 */
+  const ups = data.upstreams || [];
+  const healthy = ups.filter(u => u.enabled && u.healthy).length;
+  const degraded = ups.filter(u => u.enabled && !u.healthy).length;
+  const conns = (data.accounts || []).reduce((a, x) => a + (x.stats?.connections || 0), 0);
+  const traffic = (data.accounts || []).reduce((a, x) => a + (x.stats?.up_bytes || 0) + (x.stats?.down_bytes || 0), 0);
+  $('strip').innerHTML = `
+    <div class="stat ok"><div class="k">健康上游</div><div class="v">${healthy}<span class="unit">/ ${ups.length}</span></div></div>
+    <div class="stat ${degraded ? 'bad' : ''}"><div class="k">不健康</div><div class="v">${degraded}</div></div>
+    <div class="stat"><div class="k">當前連接</div><div class="v">${conns}</div></div>
+    <div class="stat"><div class="k">累計流量</div><div class="v">${fmt(traffic)}</div></div>`;
+
+  /* 上游表 */
   const tb = $('upTable').querySelector('tbody'); tb.innerHTML = '';
-  for (const u of overview.upstreams) {
-    const badge = !u.enabled ? '<span class="badge b-off">停用</span>'
-      : u.healthy ? '<span class="badge b-ok">健康</span>'
-      : '<span class="badge b-bad" title="'+esc(u.last_error||'')+'">不健康</span>';
+  $('upEmpty').style.display = ups.length ? 'none' : '';
+  $('upTable').style.display = ups.length ? '' : 'none';
+  for (const u of ups) {
     const st = u.stats || {};
+    const status = !u.enabled
+      ? '<span class="badge b-off">停用</span>'
+      : u.healthy
+        ? `<span class="dot ok"></span><span class="badge b-ok">健康</span>`
+        : `<span class="dot bad"></span><span class="badge b-bad" title="${esc(u.last_error || '探測失敗')}">不健康</span>`;
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${esc(u.name)}</td>
-      <td>${badge}${u.last_error && u.enabled ? '<div class="hint" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(u.last_error)+'</div>' : ''}</td>
-      <td class="mono">${esc(u.username)}</td>
-      <td class="mono" style="color:var(--dim)">僅生成時可見</td>
+      <td class="mono">${esc(u.name)}</td>
+      <td>${status}</td>
+      <td class="mono">
+        ${esc(u.username)}
+        <button class="ghost" style="padding:2px 8px;margin-left:4px;font-size:11px" data-copy="${esc(u.username)}" title="複製用戶名">複製</button>
+      </td>
+      <td style="color:var(--faint);font-size:12px">僅生成時顯示</td>
       <td class="num">${u.rebuilds}</td>
-      <td>${fmt(st.up_bytes + (st.ipv6_up_bytes||0))} / ${fmt(st.down_bytes + (st.ipv6_down_bytes||0))}</td>
+      <td class="mono" style="white-space:normal">${fmt((st.up_bytes||0)+(st.ipv6_up_bytes||0))} / ${fmt((st.down_bytes||0)+(st.ipv6_down_bytes||0))}</td>
       <td class="actions">
-        <button class="ghost" onclick="toggle('${u.id}',${!u.enabled})">${u.enabled ? '停用' : '啟用'}</button>
-        <button class="ghost" onclick="rebuild('${u.id}')">重建</button>
-        <button class="ghost" onclick="regen('${u.id}')">換帳密</button>
-        <button class="danger" onclick="del('${u.id}')">刪除</button>
+        <button class="ghost" data-act="toggle">${u.enabled ? '停用' : '啟用'}</button>
+        <button class="ghost" data-act="rebuild">重建</button>
+        <button class="ghost" data-act="regen">換帳密</button>
+        <button class="danger" data-act="del">刪除</button>
       </td>`;
+    const bind = (act, fn) => tr.querySelector(`[data-act="${act}"]`).addEventListener('click', () => fn(u));
+    bind('toggle', u => apiCall('PATCH', '/api/upstreams/' + u.id, { enabled: !u.enabled }, '已' + (u.enabled ? '停用' : '啟用')));
+    bind('rebuild', u => apiCall('POST', `/api/upstreams/${u.id}/rebuild`, undefined, '已觸發重建'));
+    bind('regen', u => confirmBox('重新生成帳密', `上游 ${u.name} 的舊帳密將立即失效，確定？`, () =>
+      apiCall('POST', `/api/upstreams/${u.id}/credentials`, undefined, '已生成新帳密', r => showCredentials([r], '新帳密'))));
+    bind('del', u => confirmBox('刪除上游', `確定刪除 ${u.name} 及其帳密？此操作不可復原。`, () =>
+      apiCall('DELETE', '/api/upstreams/' + u.id, undefined, '已刪除'), '刪除', true));
     tb.appendChild(tr);
   }
+  tb.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', async () => {
+    toast(await copyText(b.dataset.copy), await copyText(b.dataset.copy) ? '已複製' : '複製失敗');
+  }));
+
+  /* 帳號統計表 */
   const at = $('acctTable').querySelector('tbody'); at.innerHTML = '';
-  for (const a of overview.accounts) {
-    const s = a.stats || {};
+  const accts = data.accounts || [];
+  $('acctEmpty').style.display = accts.length ? 'none' : '';
+  $('acctTable').style.display = accts.length ? '' : 'none';
+  for (const a of accts) {
+    const st = a.stats || {};
+    const bars = Math.min(8, st.connections || 0);
+    const heat = `<span class="conn-heatmap">${Array.from({length: 8}, (_, i) => `<i class="${i < bars ? 'on' : ''}"></i>`).join('')}</span>`;
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="mono">${esc(a.username)}</td><td>${esc(a.upstream)}</td>
-      <td class="num">${s.connections ?? 0}</td><td>${s.total_conns ?? 0}</td>
-      <td>${fmt(s.up_bytes)}</td><td>${fmt(s.down_bytes)}</td>
-      <td>${s.last_active && s.last_active !== '0001-01-01T00:00:00Z' ? new Date(s.last_active).toLocaleString() : '—'}</td>`;
+      <td class="mono">${esc(a.username)}</td><td class="mono">${esc(a.upstream)}</td>
+      <td class="num">${st.connections ?? 0}${heat}</td><td class="num">${st.total_conns ?? 0}</td>
+      <td class="mono">${fmt(st.up_bytes)}</td><td class="mono">${fmt(st.down_bytes)}</td>
+      <td>${ago(st.last_active)}</td>`;
     at.appendChild(tr);
   }
 }
+
+/* 統一 API 動作封裝：loading → 結果反饋 → 自動刷新 */
+async function apiCall(method, path, body, okMsg, onResult) {
+  try {
+    const r = await api(method, path, body);
+    toast(true, okMsg || '操作成功');
+    if (onResult) onResult(r);
+    refresh();
+    return r;
+  } catch (e) { toast(false, e.message); }
+}
+
+/* ---------- 業務動作 ---------- */
 async function autoReg() {
   const n = parseInt($('regCount').value || '1');
+  const b = $('btn-reg'); btnBusy(b, true);
   try {
     const r = await api('POST', '/api/upstreams/auto', { count: n });
-    const list = (r.created || []).map(x => `${x.username}:${x.password}`).join('\n');
     toast(true, `已註冊 ${r.created.length} 個 WARP 帳號`);
-    if (list) alert('新增帳密（請立即保存，密碼僅此一次完整顯示）：\n\n' + list);
+    showCredentials(r.created || [], `已註冊 ${r.created.length} 個帳號`);
     refresh();
   } catch (e) { toast(false, e.message); }
+  btnBusy(b, false);
 }
 async function importConf() {
+  const b = $('btn-imp'); btnBusy(b, true);
   try {
     const r = await api('POST', '/api/upstreams/import', { conf: $('impConf').value, name: $('impName').value });
-    toast(true, `已導入：${r.username}:${r.password}`);
-    alert('新增帳密（請立即保存）：\n\n' + r.username + ':' + r.password);
-    $('impConf').value = ''; $('impName').value = ''; refresh();
+    toast(true, '已導入');
+    showCredentials([r], '導入成功');
+    $('impConf').value = ''; $('impName').value = '';
+    refresh();
   } catch (e) { toast(false, e.message); }
-}
-async function toggle(id, enabled) { try { await api('PATCH', '/api/upstreams/' + id, { enabled }); refresh(); } catch (e) { toast(false, e.message); } }
-async function rebuild(id) { try { await api('POST', `/api/upstreams/${id}/rebuild`); toast(true, '已觸發重建'); refresh(); } catch (e) { toast(false, e.message); } }
-async function regen(id) {
-  if (!confirm('重新生成帳密後，舊帳密立即失效。確定？')) return;
-  try {
-    const r = await api('POST', `/api/upstreams/${id}/credentials`);
-    alert('新帳密：\n\n' + r.username + ':' + r.password); refresh();
-  } catch (e) { toast(false, e.message); }
-}
-async function del(id) {
-  if (!confirm('確定刪除該上游及其帳密？')) return;
-  try { await api('DELETE', '/api/upstreams/' + id); refresh(); } catch (e) { toast(false, e.message); }
+  btnBusy(b, false);
 }
 async function saveSettings() {
+  const b = $('btn-set'); btnBusy(b, true);
   try {
     await api('PUT', '/api/settings', {
       listen_socks5: $('setSocks').value, listen_http: $('setHttp').value, listen_web: $('setWeb').value,
@@ -231,13 +502,19 @@ async function saveSettings() {
     });
     toast(true, '已保存（重啟後生效）');
   } catch (e) { toast(false, e.message); }
+  btnBusy(b, false);
 }
 async function changePw() {
-  try { await api('PUT', '/api/admin/password', { password: $('newPw').value }); $('newPw').value=''; toast(true, '密碼已修改'); }
-  catch (e) { toast(false, e.message); }
+  const b = $('btn-pw'); btnBusy(b, true);
+  try {
+    await api('PUT', '/api/admin/password', { password: $('newPw').value });
+    $('newPw').value = ''; toast(true, '密碼已修改');
+  } catch (e) { toast(false, e.message); }
+  btnBusy(b, false);
 }
-// 啟動：嘗試以現有 session 直接進入
-fetch('/api/overview').then(r => { if (r.ok) afterLogin(); }).catch(()=>{});
+
+/* 啟動：以現有 session 嘗試直接進入 */
+fetch('/api/overview').then(r => { if (r.ok) afterLogin(); }).catch(() => {});
 </script>
 </body>
 </html>

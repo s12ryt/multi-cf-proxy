@@ -1,0 +1,9 @@
+- generic [ref=f1e1]:
+  - status
+  - generic [ref=f1e2]:
+    - generic [ref=f1e7]:
+      - heading "多開CF代理" [level=1] [ref=f1e8]
+      - generic [ref=f1e9]: 管理界面
+    - generic [ref=f1e10]: 管理員密碼
+    - textbox "管理員密碼" [active] [ref=f1e11]
+    - button "登 入" [ref=f1e13] [cursor=pointer]
