@@ -31,13 +31,14 @@ type wireTunnel struct {
 	id          string
 	privateHex  string
 	peerHex     string
-	endpoint    string
-	localAddrs  []netip.Addr
+	endpoint    string // 配置中的 endpoint（可為域名）
 	fingerprint string
+	localAddrs  []netip.Addr
 
-	mu  sync.Mutex
-	dev *device.Device
-	net *netstack.Net
+	mu               sync.Mutex
+	dev              *device.Device
+	net              *netstack.Net
+	resolvedEndpoint string // 每次 Start/Rebuild 重新解析出的 IP:port
 }
 
 // WireFactory 正式隧道工廠：由上游配置建立用戶態 WireGuard 隧道。
@@ -83,24 +84,51 @@ func keyB64ToHex(b64 string) (string, error) {
 	return hex.EncodeToString(raw), nil
 }
 
+// lookupHost 可注入的主機名解析（測試替換）；默認走系統解析器。
+var lookupHost = net.LookupHost
+
+// resolveEndpoint 把 endpoint 的主機名解析為 IP 字面值。
+// 新版 wireguard-go 的 IpcSet 只接受 IP:port（netip.ParseAddrPort），
+// 域名必須由調用方先解析（wg-quick 同此行為）。IP 字面值原樣返回。
+func resolveEndpoint(endpoint string) (string, error) {
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("endpoint %q 不是 host:port: %w", endpoint, err)
+	}
+	if net.ParseIP(host) != nil {
+		return endpoint, nil // 已是字面值（IPv4/IPv6）
+	}
+	ips, err := lookupHost(host)
+	if err != nil || len(ips) == 0 {
+		return "", fmt.Errorf("無法解析 endpoint 主機名 %s: %w", host, err)
+	}
+	return net.JoinHostPort(ips[0], port), nil
+}
+
 func (w *wireTunnel) ipcConfig() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "private_key=%s\n", w.privateHex)
 	fmt.Fprintf(&b, "public_key=%s\n", w.peerHex)
 	b.WriteString("allowed_ip=0.0.0.0/0\n")
 	b.WriteString("allowed_ip=::/0\n")
-	fmt.Fprintf(&b, "endpoint=%s\n", w.endpoint)
+	fmt.Fprintf(&b, "endpoint=%s\n", w.resolvedEndpoint)
 	b.WriteString("persistent_keepalive_interval=25\n")
 	return b.String()
 }
 
 // Start 建立底層 WireGuard 裝置並啟動（不等待握手完成）。
+// endpoint 域名在此解析為 IP（每次啟動重新解析，IP 變動經 Rebuild 生效）。
 func (w *wireTunnel) Start(ctx context.Context) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.dev != nil {
 		return nil
 	}
+	ep, err := resolveEndpoint(w.endpoint)
+	if err != nil {
+		return fmt.Errorf("隧道 %s endpoint 解析失敗: %w", w.id, err)
+	}
+	w.resolvedEndpoint = ep
 	tunDev, tnet, err := netstack.CreateNetTUN(w.localAddrs, warpDNS, warpMTU)
 	if err != nil {
 		return fmt.Errorf("隧道 %s 建立 netstack 失敗: %w", w.id, err)
