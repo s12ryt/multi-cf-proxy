@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -147,6 +148,59 @@ func TestHealthyList(t *testing.T) {
 	m.RecordProbe("u1", errors.New("one fail"), 0)
 	if !m.States()["u1"].Healthy {
 		t.Error("單次失敗不應立即轉不健康")
+	}
+}
+
+// TestLatencyDiscardThreshold 超過延遲門檻視為探測失敗；
+// 達既有連續失敗閾值才從健康池丟棄，低延遲探測可恢復。
+func TestLatencyDiscardThreshold(t *testing.T) {
+	var created []*fakeTunnel
+	m := NewManager(fakeFactory(&created), nil, 30*time.Millisecond, 2)
+	m.SetLatencyMax(50 * time.Millisecond)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 首次超標：記錄實測延遲並計為失敗，但未達閾值仍可用。
+	m.RecordProbe("u1", nil, 120*time.Millisecond)
+	st := m.States()["u1"]
+	if !st.Healthy || st.ConsecutiveFails != 1 || st.LastLatency != 120*time.Millisecond {
+		t.Fatalf("首次超標狀態錯誤: %+v", st)
+	}
+	if !strings.Contains(st.LastError, "超過") {
+		t.Errorf("超標應留下原因: %q", st.LastError)
+	}
+
+	// 第二次超標達閾值：不健康、從 Healthy 池排除，並排程重建。
+	m.RecordProbe("u1", nil, 120*time.Millisecond)
+	st = m.States()["u1"]
+	if st.Healthy || st.ConsecutiveFails != 2 || st.Rebuilds != 1 {
+		t.Fatalf("達閾值後應丟棄並重建: %+v", st)
+	}
+	if got := m.Healthy(); len(got) != 0 {
+		t.Errorf("延遲過高的上游不應留在健康池: %v", got)
+	}
+
+	// 後續低延遲探測可恢復使用。
+	m.RecordProbe("u1", nil, 10*time.Millisecond)
+	st = m.States()["u1"]
+	if !st.Healthy || st.ConsecutiveFails != 0 || st.LastError != "" || st.LastLatency != 10*time.Millisecond {
+		t.Errorf("低延遲恢復後狀態錯誤: %+v", st)
+	}
+}
+
+func TestLatencyDiscardDisabled(t *testing.T) {
+	var created []*fakeTunnel
+	m := NewManager(fakeFactory(&created), nil, 30*time.Millisecond, 2)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 未設定門檻（0=停用）時，再高的成功量測都不應被丟棄。
+	m.RecordProbe("u1", nil, 5*time.Second)
+	st := m.States()["u1"]
+	if !st.Healthy || st.ConsecutiveFails != 0 || st.LastError != "" || st.LastLatency != 5*time.Second {
+		t.Errorf("停用延遲丟棄後狀態錯誤: %+v", st)
 	}
 }
 

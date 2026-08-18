@@ -76,13 +76,22 @@ type tunnelEntry struct {
 
 // Manager 多隧道管理器。
 type Manager struct {
-	mu        sync.RWMutex
-	factory   Factory
-	probe     ProbeFunc
-	interval  time.Duration
-	threshold int
-	entries   map[string]*tunnelEntry
-	order     []string // 保持配置順序
+	mu         sync.RWMutex
+	factory    Factory
+	probe      ProbeFunc
+	interval   time.Duration
+	threshold  int
+	latencyMax time.Duration // 0 = 停用；超過時視為一次探測失敗
+	entries    map[string]*tunnelEntry
+	order      []string // 保持配置順序
+}
+
+// SetLatencyMax 設定探測延遲丟棄門檻。0 表示停用。
+// 超標量測會依既有 threshold 累積為探測失敗，避免單次尖峰直接切換上游。
+func (m *Manager) SetLatencyMax(max time.Duration) {
+	m.mu.Lock()
+	m.latencyMax = max
+	m.mu.Unlock()
 }
 
 // NewManager 建立管理器。interval 為探測週期，threshold 為不健康判定閾值。
@@ -206,7 +215,8 @@ func (m *Manager) States() map[string]State {
 	return out
 }
 
-// RecordProbe 記錄一次探測結果：成功恢復健康；連續失敗達閾值轉不健康並觸發自動重建。
+// RecordProbe 記錄一次探測結果：成功恢復健康；連續失敗（含延遲超標）
+// 達閾值轉不健康並觸發自動重建。
 func (m *Manager) RecordProbe(id string, probeErr error, latency time.Duration) {
 	m.mu.Lock()
 	e, ok := m.entries[id]
@@ -216,12 +226,16 @@ func (m *Manager) RecordProbe(id string, probeErr error, latency time.Duration) 
 	}
 	e.state.LastCheck = time.Now()
 	if probeErr == nil {
-		e.state.Healthy = true
-		e.state.ConsecutiveFails = 0
 		e.state.LastLatency = latency
-		e.state.LastError = ""
-		m.mu.Unlock()
-		return
+		if m.latencyMax > 0 && latency > m.latencyMax {
+			probeErr = fmt.Errorf("延遲 %s 超過丟棄閾值 %s", latency.Round(time.Millisecond), m.latencyMax.Round(time.Millisecond))
+		} else {
+			e.state.Healthy = true
+			e.state.ConsecutiveFails = 0
+			e.state.LastError = ""
+			m.mu.Unlock()
+			return
+		}
 	}
 	e.state.ConsecutiveFails++
 	e.state.LastError = probeErr.Error()
