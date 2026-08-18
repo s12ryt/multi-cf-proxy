@@ -230,3 +230,51 @@ func TestRouteDialTimeout(t *testing.T) {
 		t.Errorf("應切換到 u2, got %s", used)
 	}
 }
+
+// TestRouteRecordsDialLatency Route 成功後應記錄一筆撥號延遲樣本。
+func TestRouteRecordsDialLatency(t *testing.T) {
+	up1 := &config.Upstream{ID: "u1", Enabled: true, Account: config.Account{Username: "warp-aaaa", Password: "pw1"}}
+	col := stats.NewCollector()
+	tun := &stubTunnel{id: "u1"}
+	reg := &stubRegistry{
+		bound:   map[string]tunnel.Tunnel{"u1": tun},
+		healthy: []tunnel.Tunnel{tun},
+		health:  map[string]bool{"u1": true},
+	}
+	s := NewService(auth.NewStore([]*config.Upstream{up1}), reg, col)
+
+	conn, _, err := s.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatalf("Route 失敗: %v", err)
+	}
+	conn.Close()
+	d := col.Snapshot().Dial
+	if d.Count != 1 {
+		t.Fatalf("Dial.Count = %d, want 1（成功撥號應被記錄）", d.Count)
+	}
+	if d.MaxMS < 0 {
+		t.Errorf("耗時不應為負: %+v", d)
+	}
+}
+
+// TestRouteDialFailNoSample 撥號失敗不記錄延遲樣本（避免污染成功延遲分佈）。
+func TestRouteDialFailNoSample(t *testing.T) {
+	up1 := &config.Upstream{ID: "u1", Enabled: true, Account: config.Account{Username: "warp-aaaa", Password: "pw1"}}
+	col := stats.NewCollector()
+	tun := &stubTunnel{id: "u1"}
+	tun.dialErr.Store(errors.New("dial fail"))
+	reg := &stubRegistry{
+		bound:   map[string]tunnel.Tunnel{"u1": tun},
+		healthy: []tunnel.Tunnel{tun},
+		health:  map[string]bool{"u1": true},
+	}
+	s := NewService(auth.NewStore([]*config.Upstream{up1}), reg, col)
+
+	_, _, err := s.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err == nil {
+		t.Fatal("應失敗")
+	}
+	if d := col.Snapshot().Dial; d.Count != 0 {
+		t.Errorf("失敗撥號不應記錄樣本, got Count=%d", d.Count)
+	}
+}

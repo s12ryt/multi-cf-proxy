@@ -65,12 +65,14 @@ func (s *Service) Route(ctx context.Context, username, password, network, addr s
 	var lastErr error
 	for _, t := range candidates {
 		dctx, cancel := context.WithTimeout(ctx, s.dialTimeout)
+		start := time.Now()
 		conn, err := t.DialContext(dctx, network, addr)
 		cancel()
 		if err != nil {
 			lastErr = fmt.Errorf("上游 %s 撥號 %s 失敗: %w", t.ID(), addr, err)
 			continue
 		}
+		s.stats.RecordDial(time.Since(start))
 		return s.stats.WrapConn(conn, t.ID(), username), t.ID(), nil
 	}
 	return nil, "", fmt.Errorf("全部候選上游撥號失敗，最後錯誤: %w", lastErr)
