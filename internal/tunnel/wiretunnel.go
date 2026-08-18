@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -26,6 +27,9 @@ var warpDNS = []netip.Addr{
 	netip.MustParseAddr("2606:4700:4700::1111"),
 }
 
+// DefaultDNSCacheSeconds 經隧道 DNS 結果的默認本機快取秒數。
+const DefaultDNSCacheSeconds = 60
+
 // wireTunnel 用戶態 WireGuard 隧道（wireguard-go + gVisor netstack）。
 type wireTunnel struct {
 	id          string
@@ -38,7 +42,13 @@ type wireTunnel struct {
 	mu               sync.Mutex
 	dev              *device.Device
 	net              *netstack.Net
-	resolvedEndpoint string // 每次 Start/Rebuild 重新解析出的 IP:port
+	resolvedEndpoint string    // 每次 Start/Rebuild 重新解析出的 IP:port
+	dns              *dnsCache // 經隧道解析結果的本機快取（消除重複 DNS 往返）
+}
+
+// dnsTTLSetter 可接收 DNS 快取 TTL 的隧道（Manager 運行時傳播）。
+type dnsTTLSetter interface {
+	SetDNSCacheTTL(d time.Duration) error
 }
 
 // WireFactory 正式隧道工廠：由上游配置建立用戶態 WireGuard 隧道。
@@ -63,14 +73,31 @@ func WireFactory(u *config.Upstream) (Tunnel, error) {
 		}
 		addrs = append(addrs, ip.Unmap())
 	}
-	return &wireTunnel{
+	w := &wireTunnel{
 		id:          u.ID,
 		privateHex:  privHex,
 		peerHex:     peerHex,
 		endpoint:    u.Endpoint,
 		localAddrs:  addrs,
 		fingerprint: fingerprint(u),
-	}, nil
+	}
+	// 解析器綁定當前 netstack（Rebuild 後自動指向新實例）
+	w.dns = newDNSCache(DefaultDNSCacheSeconds*time.Second, dnsCacheMaxEntries, func(ctx context.Context, host string) ([]string, error) {
+		w.mu.Lock()
+		tn := w.net
+		w.mu.Unlock()
+		if tn == nil {
+			return nil, fmt.Errorf("隧道 %s 未運行", w.id)
+		}
+		return tn.LookupContextHost(ctx, host)
+	})
+	return w, nil
+}
+
+// SetDNSCacheTTL 調整本隧道的 DNS 快取 TTL（0 = 停用；Manager 傳播調用）。
+func (w *wireTunnel) SetDNSCacheTTL(d time.Duration) error {
+	w.dns.setTTL(d)
+	return nil
 }
 
 func keyB64ToHex(b64 string) (string, error) {
@@ -170,18 +197,36 @@ func (w *wireTunnel) ID() string { return w.id }
 // Fingerprint 返回建立時快取的配置指紋。
 func (w *wireTunnel) Fingerprint() string { return w.fingerprint }
 
-// DialContext 經隧道撥號（TCP）。
+// DialContext 經隧道撥號（TCP）。IP 字面值直連；域名先查本隧道的
+// DNS 快取（TTL 內免往返），未命中才經 WARP 解析；候選位址依序嘗試。
 func (w *wireTunnel) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+	default:
+		return nil, fmt.Errorf("隧道 %s 不支援的網絡類型 %q", w.id, network)
+	}
 	w.mu.Lock()
 	tnet := w.net
+	cache := w.dns
 	w.mu.Unlock()
 	if tnet == nil {
 		return nil, fmt.Errorf("隧道 %s 未運行", w.id)
 	}
-	switch network {
-	case "tcp", "tcp4", "tcp6":
-		return tnet.DialContext(ctx, "tcp", addr)
-	default:
-		return nil, fmt.Errorf("隧道 %s 不支援的網絡類型 %q", w.id, network)
+
+	candidates, err := resolveTarget(ctx, cache, addr)
+	if err != nil {
+		return nil, err
 	}
+	var lastErr error
+	for _, ap := range candidates {
+		conn, derr := tnet.DialContextTCPAddrPort(ctx, ap)
+		if derr == nil {
+			return conn, nil
+		}
+		lastErr = derr
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, fmt.Errorf("隧道 %s 撥號 %s 失敗: %w", w.id, addr, lastErr)
 }
