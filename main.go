@@ -44,6 +44,14 @@ func main() {
 		time.Duration(c.HealthCheck.IntervalSeconds)*time.Second,
 		c.HealthCheck.FailureThreshold)
 	tm.SetLatencyMax(time.Duration(c.HealthCheck.LatencyDiscardSeconds * float64(time.Second)))
+	// 經隧道 DNS 結果本機快取（0 = 停用）；>0 時同域名連線免重複 DNS 往返
+	if err := tm.SetDNSCacheTTL(time.Duration(c.DNSCacheSeconds) * time.Second); err != nil {
+		log.Fatalf("設定 DNS 快取失敗: %v", err)
+	}
+	// 獨立延遲探測循環（0 = 隨健康檢查；>0 = 更高頻更新延遲並計入丟棄判定）
+	if p := c.HealthCheck.LatencyProbeSeconds; p > 0 {
+		tm.SetLatencyProbeInterval(time.Duration(p) * time.Second)
+	}
 	authStore := auth.NewStore(nil)
 	collector := stats.NewCollector()
 	svc := dispatcher.NewService(authStore, dispatcher.NewRegistry(tm), collector)
