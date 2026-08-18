@@ -2,19 +2,27 @@
 # 多開CF代理（multi-cf-proxy）一鍵安裝腳本
 # 適用：Linux amd64/arm64 + systemd（Debian/Ubuntu/Rocky/Arch 等主流發行版）
 #
+# 佈局（v1.2.0 起，全面不使用 /usr 與 /var/lib）：
+#   /etc/multi-cf-proxy/multi-cf-proxy   二進制（root:root 0755）
+#   /etc/multi-cf-proxy/config.json      配置（服務帳戶可寫）
+#
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/s12ryt/multi-cf-proxy/main/deploy/install.sh | sudo bash
-#   指定版本：curl -fsSL ... | sudo VERSION=v1.1.1 bash
+#   指定版本：curl -fsSL ... | sudo VERSION=v1.2.0 bash
 #   解除安裝：curl -fsSL ... | sudo bash -s -- --uninstall
 set -eu
 
 REPO="s12ryt/multi-cf-proxy"
-BIN="/usr/local/bin/multi-cf-proxy"
-CONF_DIR="/var/lib/multi-cf-proxy"
-PRIVATE_CONF_DIR="/var/lib/private/multi-cf-proxy"
+BASE_DIR="/etc/multi-cf-proxy"
+BIN="$BASE_DIR/multi-cf-proxy"
 SERVICE_FILE="/etc/systemd/system/multi-cf-proxy.service"
 SERVICE_NAME="multi-cf-proxy"
 SVC_USER="multi-cf-proxy"
+
+# 舊版（<=v1.1.3）路徑，升級時遷移/清理
+LEGACY_BIN="/usr/local/bin/multi-cf-proxy"
+LEGACY_CONF_DIR="/var/lib/multi-cf-proxy"
+LEGACY_PRIVATE_DIR="/var/lib/private/multi-cf-proxy"
 VERSION="${VERSION:-}"
 
 GREEN='\033[1;32m'; RED='\033[1;31m'; YELLOW='\033[1;33m'; OFF='\033[0m'
@@ -26,13 +34,15 @@ err() { printf "${RED}[錯誤]${OFF} %s\n" "$*" >&2; }
 if [ "${1:-}" = "--uninstall" ]; then
   [ "$(id -u)" -eq 0 ] || { err "請以 root 執行"; exit 1; }
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
-  rm -f "$SERVICE_FILE" "$BIN"
+  rm -f "$SERVICE_FILE"
   systemctl daemon-reload 2>/dev/null || true
+  rm -rf "$BASE_DIR"                                  # 二進制+配置（含帳密）
+  rm -f "$LEGACY_BIN" 2>/dev/null || true             # 舊版二進制
+  rm -rf "$LEGACY_CONF_DIR" "$LEGACY_PRIVATE_DIR" 2>/dev/null || true
   if id "$SVC_USER" >/dev/null 2>&1; then
     userdel "$SVC_USER" 2>/dev/null || warn "無法刪除帳號 $SVC_USER（可能仍有進程佔用）"
   fi
-  log "已解除安裝。配置目錄 $CONF_DIR（含帳密）保留，如確認不再使用請手動刪除："
-  echo "  rm -rf $CONF_DIR"
+  log "已完全解除安裝（含配置與帳密）"
   exit 0
 fi
 
@@ -77,16 +87,39 @@ else
   warn "無法下載 checksums.txt，跳過校驗"
 fi
 
-# ---- 建立專用系統帳戶（不使用 DynamicUser：部分容器化 VPS 會 exec EACCES）----
+# ---- 建立專用系統帳戶 ----
 if id "$SVC_USER" >/dev/null 2>&1; then
   log "系統帳號 $SVC_USER 已存在，沿用"
 else
-  useradd --system --home-dir "$CONF_DIR" --shell /usr/sbin/nologin --no-create-home "$SVC_USER"
+  useradd --system --home-dir "$BASE_DIR" --shell /usr/sbin/nologin --no-create-home "$SVC_USER"
   log "已建立系統帳號 $SVC_USER"
 fi
 
-# ---- 安裝二進制 ----
-install -m 0755 "$TMP/$ASSET" "$BIN"
+# ---- 安裝目錄與二進制（全部位於 /etc/multi-cf-proxy）----
+mkdir -p "$BASE_DIR"
+install -m 0755 -o root -g root "$TMP/$ASSET" "$BIN"
+# 目錄歸服務帳戶（config.json 原子寫入需要目錄寫權）
+chown "$SVC_USER:$SVC_USER" "$BASE_DIR"
+chmod 750 "$BASE_DIR"
+
+# ---- 舊版遷移與清理 ----
+# 遷移配置（優先保留帳密）；DynamicUser 時代可能經由懸空 symlink 指向 private
+if [ ! -e "$BASE_DIR/config.json" ]; then
+  if [ -f "$LEGACY_CONF_DIR/config.json" ]; then
+    cp "$LEGACY_CONF_DIR/config.json" "$BASE_DIR/config.json"
+    chown "$SVC_USER:$SVC_USER" "$BASE_DIR/config.json"
+    log "已遷移舊配置（帳密保留）"
+  elif [ -f "$LEGACY_PRIVATE_DIR/config.json" ]; then
+    cp "$LEGACY_PRIVATE_DIR/config.json" "$BASE_DIR/config.json"
+    chown "$SVC_USER:$SVC_USER" "$BASE_DIR/config.json"
+    log "已遷移舊配置（帳密保留，自 private 目錄）"
+  fi
+fi
+# 清掉舊安裝位置（rm -rf 對 symlink 只刪連結本身）
+rm -f "$LEGACY_BIN" 2>/dev/null || true
+rm -rf "$LEGACY_PRIVATE_DIR" 2>/dev/null || true
+[ -L "$LEGACY_CONF_DIR" ] && rm -f "$LEGACY_CONF_DIR"
+[ -d "$LEGACY_CONF_DIR" ] && rmdir "$LEGACY_CONF_DIR" 2>/dev/null || true
 
 # ---- 執行權診斷（126 = 無法執行：多半是 noexec 掛載）----
 EXEC_RC=0
@@ -97,26 +130,9 @@ if [ "$EXEC_RC" = "126" ]; then
   exit 1
 fi
 
-# ---- 修復歷史殘留 ----
-# DynamicUser 時代 systemd 會把 /var/lib/multi-cf-proxy 變成指向
-# /var/lib/private/multi-cf-proxy 的符號連結；若兩處皆無配置則全清，
-# 避免懸空符號連結導致 238/STATE_DIRECTORY 或 mkdir 失敗。
-# （rm -rf 對符號連結只刪連結本身，安全）
-if [ ! -e "$CONF_DIR/config.json" ] && [ ! -e "$PRIVATE_CONF_DIR/config.json" ]; then
-  [ -L "$CONF_DIR" ] && rm -f "$CONF_DIR"
-  [ -d "$PRIVATE_CONF_DIR" ] && rm -rf "$PRIVATE_CONF_DIR"
-fi
-
-# 顯式建立狀態目錄並授權（不依賴 systemd StateDirectory：容器環境行為不一）
-mkdir -p "$CONF_DIR"
-chown "$SVC_USER:$SVC_USER" "$CONF_DIR"
-chmod 750 "$CONF_DIR"
-
 # ---- 安裝 systemd 服務（加固版失敗自動回退相容版）----
-# 部分容器化 VPS 不支援掛載命名空間，ProtectSystem/PrivateTmp 等沙箱選項
-# 會導致 exec EACCES（203/EXEC）。先試加固版，失敗自動降級。
 write_unit_hardened() {
-cat > "$SERVICE_FILE" <<'EOF'
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Multi-CF-Proxy (多開CF代理)
 After=network-online.target
@@ -124,12 +140,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/multi-cf-proxy -config /var/lib/multi-cf-proxy/config.json
+ExecStart=$BIN -config $BASE_DIR/config.json
 Restart=always
 RestartSec=5
-User=multi-cf-proxy
-Group=multi-cf-proxy
-ReadWritePaths=/var/lib/multi-cf-proxy
+User=$SVC_USER
+Group=$SVC_USER
+ReadWritePaths=$BASE_DIR
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=yes
@@ -141,7 +157,7 @@ EOF
 }
 
 write_unit_compat() {
-cat > "$SERVICE_FILE" <<'EOF'
+cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Multi-CF-Proxy (多開CF代理)
 After=network-online.target
@@ -149,11 +165,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/multi-cf-proxy -config /var/lib/multi-cf-proxy/config.json
+ExecStart=$BIN -config $BASE_DIR/config.json
 Restart=always
 RestartSec=5
-User=multi-cf-proxy
-Group=multi-cf-proxy
+User=$SVC_USER
+Group=$SVC_USER
 
 [Install]
 WantedBy=multi-user.target
@@ -202,7 +218,7 @@ if [ -n "$PW_HINT" ]; then
 else
   echo "  │ 管理密碼 : journalctl -u multi-cf-proxy --no-pager | grep 管理員密碼"
 fi
-echo "  │ 配置文件 : $CONF_DIR/config.json"
+echo "  │ 程式與配置 : $BASE_DIR"
 echo "  │ 服務日誌 : journalctl -u multi-cf-proxy -f"
 echo "  │ 解除安裝 : 再次執行本腳本加 --uninstall"
 echo "  └──────────────────────────────────────────────────────"

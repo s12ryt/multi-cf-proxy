@@ -33,12 +33,12 @@ curl -fsSL https://raw.githubusercontent.com/s12ryt/multi-cf-proxy/main/deploy/i
 
 ### 手动安装（替代）
 
-从 [Releases](../../releases) 下载对应架构的二进制：
+从 [Releases](../../releases) 下载对应架构的二进制（v1.2.0 起布局：程序与配置统一在 `/etc/multi-cf-proxy`，不安装到 /usr）：
 
 ```bash
-sudo cp multi-cf-proxy-linux-amd64 /usr/local/bin/multi-cf-proxy
-sudo chmod +x /usr/local/bin/multi-cf-proxy
-sudo mkdir -p /var/lib/multi-cf-proxy
+sudo install -d -o multi-cf-proxy -g multi-cf-proxy -m 750 /etc/multi-cf-proxy
+sudo install -m 755 multi-cf-proxy-linux-amd64 /etc/multi-cf-proxy/multi-cf-proxy
+sudo useradd --system -d /etc/multi-cf-proxy -s /usr/sbin/nologin -M multi-cf-proxy 2>/dev/null || true
 sudo cp deploy/systemd/multi-cf-proxy.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now multi-cf-proxy
 sudo journalctl -u multi-cf-proxy | grep 管理员密码   # 首次生成的密码

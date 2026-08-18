@@ -37,12 +37,14 @@ starts it → prints the admin password.
 
 ### Manual Install (alternative)
 
-Download the binary for your architecture from [Releases](../../releases):
+Download the binary for your architecture from [Releases](../../releases)
+(since v1.2.0 the layout keeps the binary and config together under
+`/etc/multi-cf-proxy`; nothing is installed into /usr):
 
 ```bash
-sudo cp multi-cf-proxy-linux-amd64 /usr/local/bin/multi-cf-proxy
-sudo chmod +x /usr/local/bin/multi-cf-proxy
-sudo mkdir -p /var/lib/multi-cf-proxy
+sudo install -d -o multi-cf-proxy -g multi-cf-proxy -m 750 /etc/multi-cf-proxy
+sudo install -m 755 multi-cf-proxy-linux-amd64 /etc/multi-cf-proxy/multi-cf-proxy
+sudo useradd --system -d /etc/multi-cf-proxy -s /usr/sbin/nologin -M multi-cf-proxy 2>/dev/null || true
 sudo cp deploy/systemd/multi-cf-proxy.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now multi-cf-proxy
 sudo journalctl -u multi-cf-proxy | grep "管理員密碼"   # password from first boot
