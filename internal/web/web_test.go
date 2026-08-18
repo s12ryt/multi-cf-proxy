@@ -34,11 +34,17 @@ Endpoint = engage.cloudflareclient.com:2408
 // fakeTunnel web 測試用隧道樁。
 type fakeTunnel struct {
 	id       string
+	fp       atomic.Value // 配置指紋（factory 時快照，避免 Sync 誤判重建）
 	rebuilds atomic.Int64
 }
 
-func (f *fakeTunnel) ID() string                        { return f.id }
-func (f *fakeTunnel) Fingerprint() string               { return "fp-" + f.id }
+func (f *fakeTunnel) ID() string { return f.id }
+func (f *fakeTunnel) Fingerprint() string {
+	if v, ok := f.fp.Load().(string); ok {
+		return v
+	}
+	return ""
+}
 func (f *fakeTunnel) Start(ctx context.Context) error   { return nil }
 func (f *fakeTunnel) Stop()                             {}
 func (f *fakeTunnel) Rebuild(ctx context.Context) error { f.rebuilds.Add(1); return nil }
@@ -54,6 +60,7 @@ type testEnv struct {
 	tunnels  map[string]*fakeTunnel
 	regCalls atomic.Int64
 	regErr   atomic.Value // error
+	st       *stats.Collector
 	client   *http.Client
 }
 
@@ -69,6 +76,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	tunnels := map[string]*fakeTunnel{}
 	factory := func(u *config.Upstream) (tunnel.Tunnel, error) {
 		ft := &fakeTunnel{id: u.ID}
+		ft.fp.Store(u.PrivateKey + "|" + u.PeerPublicKey + "|" + u.Endpoint + "|" + fmt.Sprint(u.Addresses))
 		tunnels[u.ID] = ft
 		return ft, nil
 	}
@@ -77,6 +85,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	}, 30*time.Second, 3)
 
 	env := &testEnv{cfgPath: cfgPath, cfg: cfg, tm: tm, tunnels: tunnels}
+	env.st = stats.NewCollector()
 	env.regCalls.Store(0)
 	register := func(ctx context.Context) (warp.Conf, error) {
 		n := env.regCalls.Add(1)
@@ -91,7 +100,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		}, nil
 	}
 
-	s := New(cfg, tm, auth.NewStore(nil), stats.NewCollector(), register)
+	s := New(cfg, tm, auth.NewStore(nil), env.st, register)
 	env.srv = httptest.NewServer(s.Handler())
 	t.Cleanup(env.srv.Close)
 
@@ -317,10 +326,23 @@ func TestUpstreamLifecycle(t *testing.T) {
 		t.Error("應已停用")
 	}
 
-	// 手動重建
+	// 手動重建（v1.6 語意：停用上游不可重建——400，且不觸碰隧道）
+	resp, _ = e.do(t, "POST", "/api/upstreams/"+id+"/rebuild", nil, &ck)
+	if resp.StatusCode != 400 {
+		t.Fatalf("停用上游重建應 400, got %d", resp.StatusCode)
+	}
+	if e.tunnels[id].rebuilds.Load() != 0 {
+		t.Error("停用上游不應被重建")
+	}
+
+	// 重新啟用後重建 → 200
+	resp, _ = e.do(t, "PATCH", "/api/upstreams/"+id, map[string]bool{"enabled": true}, &ck)
+	if resp.StatusCode != 200 {
+		t.Fatalf("重新啟用應 200, got %d", resp.StatusCode)
+	}
 	resp, _ = e.do(t, "POST", "/api/upstreams/"+id+"/rebuild", nil, &ck)
 	if resp.StatusCode != 200 {
-		t.Fatalf("重建應 200, got %d", resp.StatusCode)
+		t.Fatalf("啟用上游重建應 200, got %d", resp.StatusCode)
 	}
 	if e.tunnels[id].rebuilds.Load() < 1 {
 		t.Error("隧道應被重建")
@@ -392,6 +414,47 @@ func TestSettingsUpdate(t *testing.T) {
 	if resp.StatusCode != 400 {
 		t.Errorf("負的延遲門檻應 400, got %d", resp.StatusCode)
 	}
+
+	// v1.6：DNS 快取與延遲探測設置——保存、部分更新保持、負值拒絕。
+	full := map[string]any{
+		"dns_cache_seconds": 120,
+		"health":            map[string]any{"latency_probe_seconds": 5},
+	}
+	if resp, _ = e.do(t, "PUT", "/api/settings", full, &ck); resp.StatusCode != 200 {
+		t.Fatalf("DNS/探測設置應 200, got %d", resp.StatusCode)
+	}
+	got := e.cfg.Get()
+	if got.DNSCacheSeconds != 120 || got.HealthCheck.LatencyProbeSeconds != 5 {
+		t.Errorf("DNS/探測設置未生效: dns=%d probe=%d", got.DNSCacheSeconds, got.HealthCheck.LatencyProbeSeconds)
+	}
+	// 僅更新端口：兩個新欄位不被重置
+	if resp, _ = e.do(t, "PUT", "/api/settings", map[string]any{"listen_web": ":9090"}, &ck); resp.StatusCode != 200 {
+		t.Fatalf("部分更新應 200")
+	}
+	got = e.cfg.Get()
+	if got.DNSCacheSeconds != 120 || got.HealthCheck.LatencyProbeSeconds != 5 {
+		t.Errorf("省略欄位不應重置: dns=%d probe=%d", got.DNSCacheSeconds, got.HealthCheck.LatencyProbeSeconds)
+	}
+	// 負值拒絕
+	if resp, _ = e.do(t, "PUT", "/api/settings", map[string]any{"dns_cache_seconds": -1}, &ck); resp.StatusCode != 400 {
+		t.Errorf("負 DNS 快取應 400, got %d", resp.StatusCode)
+	}
+	if resp, _ = e.do(t, "PUT", "/api/settings", map[string]any{"health": map[string]any{"latency_probe_seconds": -2}}, &ck); resp.StatusCode != 400 {
+		t.Errorf("負探測間隔應 400, got %d", resp.StatusCode)
+	}
+	// overview 暴露 dns_cache_seconds
+	resp, body = e.do(t, "GET", "/api/overview", nil, &ck)
+	if resp.StatusCode != 200 {
+		t.Fatalf("overview 應 200")
+	}
+	s, _ := body["settings"].(map[string]any)
+	if v, _ := s["dns_cache_seconds"].(float64); v != 120 {
+		t.Errorf("overview settings.dns_cache_seconds = %#v, want 120", s["dns_cache_seconds"])
+	}
+	h, _ := s["health"].(map[string]any)
+	if v, _ := h["latency_probe_seconds"].(float64); v != 5 {
+		t.Errorf("overview settings.health.latency_probe_seconds = %#v, want 5", h["latency_probe_seconds"])
+	}
 }
 
 func TestOverviewIncludesLastLatency(t *testing.T) {
@@ -458,5 +521,88 @@ func TestStatsEndpoint(t *testing.T) {
 	}
 	if _, ok := m["accounts"]; !ok {
 		t.Errorf("stats 應含 accounts: %v", m)
+	}
+}
+
+// TestStatsIncludesDial v1.6：stats API 應含撥號延遲分佈（count/p50/p95/max）。
+func TestStatsIncludesDial(t *testing.T) {
+	e := newTestEnv(t)
+	ck := e.login(t)
+	for i := 1; i <= 20; i++ {
+		e.st.RecordDial(time.Duration(i) * time.Millisecond)
+	}
+
+	resp, m := e.do(t, "GET", "/api/stats", nil, &ck)
+	if resp.StatusCode != 200 {
+		t.Fatalf("stats 應 200, got %d", resp.StatusCode)
+	}
+	dial, ok := m["dial"].(map[string]any)
+	if !ok {
+		t.Fatalf("stats 應含 dial 物件: %v", m)
+	}
+	if dial["count"].(float64) != 20 {
+		t.Errorf("dial.count = %v, want 20", dial["count"])
+	}
+	// 20 筆 1..20ms：nearest-rank p50=10ms、p95=19ms、max=20ms
+	if dial["p50_ms"].(float64) != 10 {
+		t.Errorf("dial.p50_ms = %v, want 10", dial["p50_ms"])
+	}
+	if dial["p95_ms"].(float64) != 19 {
+		t.Errorf("dial.p95_ms = %v, want 19", dial["p95_ms"])
+	}
+	if dial["max_ms"].(float64) != 20 {
+		t.Errorf("dial.max_ms = %v, want 20", dial["max_ms"])
+	}
+}
+
+// TestRebuildEndpointSemantics v1.6：重建按鈕走狀態機——停用上游 400、不存在 404、成功 200 且計數。
+func TestRebuildEndpointSemantics(t *testing.T) {
+	e := newTestEnv(t)
+	ck := e.login(t)
+	mk := func(id string, enabled bool) {
+		e.cfg.Update(func(c *config.Config) error {
+			c.Upstreams = append(c.Upstreams, config.Upstream{
+				ID: id, Name: id, Enabled: enabled,
+				PrivateKey: base64Key(1), PeerPublicKey: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+				Endpoint: "engage.cloudflareclient.com:2408", Addresses: []string{"172.16.0.2/32"},
+				Account: config.Account{Username: "u-" + id, Password: "pw-" + id},
+			})
+			return nil
+		})
+	}
+	mk("uon", true)
+	mk("uoff", false)
+	// 直接對齊隧道集合（overview 不觸發 sync）
+	c := e.cfg.Get()
+	ups := make([]*config.Upstream, 0, len(c.Upstreams))
+	for i := range c.Upstreams {
+		ups = append(ups, &c.Upstreams[i])
+	}
+	if err := e.tm.Sync(context.Background(), ups); err != nil {
+		t.Fatal(err)
+	}
+
+	// 停用上游 → 400（不可喚醒未運行隧道）
+	resp, _ := e.do(t, "POST", "/api/upstreams/uoff/rebuild", nil, &ck)
+	if resp.StatusCode != 400 {
+		t.Errorf("停用上游重建應 400, got %d", resp.StatusCode)
+	}
+	if e.tunnels["uoff"].rebuilds.Load() != 0 {
+		t.Error("停用上游不應被重建")
+	}
+
+	// 不存在 → 404
+	resp, _ = e.do(t, "POST", "/api/upstreams/nope/rebuild", nil, &ck)
+	if resp.StatusCode != 404 {
+		t.Errorf("不存在上游應 404, got %d", resp.StatusCode)
+	}
+
+	// 啟用上游 → 200，底層重建計數 +1
+	resp, _ = e.do(t, "POST", "/api/upstreams/uon/rebuild", nil, &ck)
+	if resp.StatusCode != 200 {
+		t.Errorf("啟用上游重建應 200, got %d", resp.StatusCode)
+	}
+	if e.tunnels["uon"].rebuilds.Load() < 1 {
+		t.Error("啟用上游應被重建")
 	}
 }

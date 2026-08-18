@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -304,10 +305,11 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		"upstreams": ups,
 		"accounts":  accts,
 		"settings": map[string]any{
-			"listen_socks5": c.ListenSocks5,
-			"listen_http":   c.ListenHTTP,
-			"listen_web":    c.ListenWeb,
-			"health":        c.HealthCheck,
+			"listen_socks5":     c.ListenSocks5,
+			"listen_http":       c.ListenHTTP,
+			"listen_web":        c.ListenWeb,
+			"dns_cache_seconds": c.DNSCacheSeconds,
+			"health":            c.HealthCheck,
 		},
 	})
 }
@@ -444,13 +446,15 @@ func (s *Server) handleGetCredentials(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	tn, ok := s.tm.Get(id)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "隧道不存在（上游可能未啟用）"})
-		return
-	}
-	if err := tn.Rebuild(r.Context()); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	if err := s.tm.Rebuild(r.Context(), id); err != nil {
+		switch {
+		case errors.Is(err, tunnel.ErrTunnelNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "隧道不存在（上游可能已刪除）"})
+		case errors.Is(err, tunnel.ErrTunnelNotRunning):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "上游已停用，請先啟用再重建"})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
@@ -523,13 +527,15 @@ func (s *Server) handleDeleteUpstream(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ListenSocks5 string `json:"listen_socks5"`
-		ListenHTTP   string `json:"listen_http"`
-		ListenWeb    string `json:"listen_web"`
-		Health       *struct {
+		ListenSocks5    string `json:"listen_socks5"`
+		ListenHTTP      string `json:"listen_http"`
+		ListenWeb       string `json:"listen_web"`
+		DNSCacheSeconds *int   `json:"dns_cache_seconds"` // 顯式 0 = 停用；nil = 不變
+		Health          *struct {
 			IntervalSeconds       *int     `json:"interval_seconds"`
 			FailureThreshold      *int     `json:"failure_threshold"`
 			LatencyDiscardSeconds *float64 `json:"latency_discard_seconds"`
+			LatencyProbeSeconds   *int     `json:"latency_probe_seconds"` // 0 = 隨健康檢查
 		} `json:"health"`
 	}
 	if err := readJSON(r, &body); err != nil {
@@ -546,6 +552,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if v := body.ListenWeb; v != "" {
 			c.ListenWeb = v
 		}
+		if body.DNSCacheSeconds != nil {
+			c.DNSCacheSeconds = *body.DNSCacheSeconds
+		}
 		if body.Health != nil {
 			if body.Health.IntervalSeconds != nil {
 				c.HealthCheck.IntervalSeconds = *body.Health.IntervalSeconds
@@ -553,12 +562,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			if body.Health.FailureThreshold != nil {
 				c.HealthCheck.FailureThreshold = *body.Health.FailureThreshold
 			}
-			// 0 是明確的「停用」值；指標 nil 則表示請求未提供此欄位。
+			// 0 是明確的「停用/隨健康檢查」值；指標 nil 則表示請求未提供此欄位。
 			if body.Health.LatencyDiscardSeconds != nil {
 				c.HealthCheck.LatencyDiscardSeconds = *body.Health.LatencyDiscardSeconds
 			}
+			if body.Health.LatencyProbeSeconds != nil {
+				c.HealthCheck.LatencyProbeSeconds = *body.Health.LatencyProbeSeconds
+			}
 		}
-		return nil
+		return c.Validate()
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
