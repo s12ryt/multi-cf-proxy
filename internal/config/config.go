@@ -14,6 +14,7 @@ type HealthCheckConfig struct {
 	IntervalSeconds       int     `json:"interval_seconds"`
 	FailureThreshold      int     `json:"failure_threshold"`
 	LatencyDiscardSeconds float64 `json:"latency_discard_seconds"` // 0 = 停用
+	LatencyProbeSeconds   int     `json:"latency_probe_seconds"`   // 0 = 隨健康檢查；>0 = 獨立更高頻延遲探測
 }
 
 // Account 綁定在某個上游的入站帳密（用戶名:密碼）。
@@ -37,20 +38,22 @@ type Upstream struct {
 
 // Config 頂層配置，持久化為單一 JSON 文件。
 type Config struct {
-	AdminPassword string            `json:"admin_password"`
-	ListenSocks5  string            `json:"listen_socks5"`
-	ListenHTTP    string            `json:"listen_http"`
-	ListenWeb     string            `json:"listen_web"`
-	HealthCheck   HealthCheckConfig `json:"health_check"`
-	Upstreams     []Upstream        `json:"upstreams"`
+	AdminPassword   string            `json:"admin_password"`
+	ListenSocks5    string            `json:"listen_socks5"`
+	ListenHTTP      string            `json:"listen_http"`
+	ListenWeb       string            `json:"listen_web"`
+	HealthCheck     HealthCheckConfig `json:"health_check"`
+	DNSCacheSeconds int               `json:"dns_cache_seconds"` // 經隧道 DNS 結果的本機快取秒數；0 = 停用
+	Upstreams       []Upstream        `json:"upstreams"`
 }
 
 // Default 返回默認配置。AdminPassword 留空，由首次啟動流程生成。
 func Default() *Config {
 	return &Config{
-		ListenSocks5: ":1080",
-		ListenHTTP:   ":8080",
-		ListenWeb:    ":8081",
+		ListenSocks5:    ":1080",
+		ListenHTTP:      ":8080",
+		ListenWeb:       ":8081",
+		DNSCacheSeconds: 60,
 		HealthCheck: HealthCheckConfig{
 			IntervalSeconds:  30,
 			FailureThreshold: 3,
@@ -102,6 +105,12 @@ func (c *Config) Validate() error {
 	if c.HealthCheck.LatencyDiscardSeconds < 0 {
 		return fmt.Errorf("health_check.latency_discard_seconds 不可小於 0")
 	}
+	if c.DNSCacheSeconds < 0 {
+		return fmt.Errorf("dns_cache_seconds 不可小於 0")
+	}
+	if c.HealthCheck.LatencyProbeSeconds < 0 {
+		return fmt.Errorf("health_check.latency_probe_seconds 不可小於 0")
+	}
 	seen := map[string]bool{}
 	for i, u := range c.Upstreams {
 		if u.ID == "" {
@@ -143,6 +152,14 @@ func Load(path string) (*Config, error) {
 	var c Config
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil, fmt.Errorf("解析配置 %s 失敗: %w", path, err)
+	}
+	// dns_cache_seconds：缺鍵（存量配置）補默認 60；顯式 0 = 停用。
+	// int 零值無法區分兩者，故以指標探測原始 JSON 是否含該鍵。
+	var probe struct {
+		DNSCacheSeconds *int `json:"dns_cache_seconds"`
+	}
+	if err := json.Unmarshal(raw, &probe); err == nil && probe.DNSCacheSeconds == nil {
+		c.DNSCacheSeconds = 60
 	}
 	c.FillDefaults()
 	return &c, nil

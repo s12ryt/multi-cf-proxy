@@ -61,6 +61,7 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 		},
 	}
 	orig.HealthCheck.LatencyDiscardSeconds = 1.5
+	orig.DNSCacheSeconds = 45
 	if err := orig.Save(path); err != nil {
 		t.Fatalf("Save 失敗: %v", err)
 	}
@@ -86,6 +87,46 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 	}
 	if got.HealthCheck.LatencyDiscardSeconds != 1.5 {
 		t.Errorf("延遲丟棄秒數回讀不一致: %v", got.HealthCheck.LatencyDiscardSeconds)
+	}
+	if got.DNSCacheSeconds != 45 {
+		t.Errorf("DNS 快取秒數回讀不一致: %v", got.DNSCacheSeconds)
+	}
+}
+
+// TestDNSCacheDefaultAndZero v1.6：缺鍵=60（存量升級自動受益）；顯式 0=停用；負值非法。
+func TestDNSCacheDefaultAndZero(t *testing.T) {
+	// 全新默認 60
+	if d := Default(); d.DNSCacheSeconds != 60 {
+		t.Errorf("Default DNSCacheSeconds = %d, want 60", d.DNSCacheSeconds)
+	}
+	dir := t.TempDir()
+
+	// 存量配置（無 dns_cache_seconds 鍵）→ Load 補 60
+	legacy := filepath.Join(dir, "legacy.json")
+	os.WriteFile(legacy, []byte(`{"listen_socks5":":1080","listen_http":":8080","listen_web":":8081","health_check":{"interval_seconds":30,"failure_threshold":3}}`), 0o600)
+	c, err := Load(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DNSCacheSeconds != 60 {
+		t.Errorf("缺鍵應補 60, got %d", c.DNSCacheSeconds)
+	}
+
+	// 顯式 0 → 停用（Load 不覆蓋）
+	off := filepath.Join(dir, "off.json")
+	os.WriteFile(off, []byte(`{"dns_cache_seconds":0,"health_check":{"interval_seconds":30,"failure_threshold":3}}`), 0o600)
+	c, err = Load(off)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DNSCacheSeconds != 0 {
+		t.Errorf("顯式 0 應保留為停用, got %d", c.DNSCacheSeconds)
+	}
+
+	// 負值 → Validate 拒絕
+	c.DNSCacheSeconds = -1
+	if err := c.Validate(); err == nil {
+		t.Error("負值應非法")
 	}
 }
 
