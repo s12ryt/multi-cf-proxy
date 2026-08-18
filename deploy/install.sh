@@ -112,7 +112,10 @@ mkdir -p "$CONF_DIR"
 chown "$SVC_USER:$SVC_USER" "$CONF_DIR"
 chmod 750 "$CONF_DIR"
 
-# ---- 安裝 systemd 服務 ----
+# ---- 安裝 systemd 服務（加固版失敗自動回退相容版）----
+# 部分容器化 VPS 不支援掛載命名空間，ProtectSystem/PrivateTmp 等沙箱選項
+# 會導致 exec EACCES（203/EXEC）。先試加固版，失敗自動降級。
+write_unit_hardened() {
 cat > "$SERVICE_FILE" <<'EOF'
 [Unit]
 Description=Multi-CF-Proxy (多開CF代理)
@@ -135,18 +138,57 @@ PrivateTmp=yes
 [Install]
 WantedBy=multi-user.target
 EOF
+}
 
-systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME"
-sleep 2
+write_unit_compat() {
+cat > "$SERVICE_FILE" <<'EOF'
+[Unit]
+Description=Multi-CF-Proxy (多開CF代理)
+After=network-online.target
+Wants=network-online.target
 
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-  log "服務已啟動並設為開機自啟"
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/multi-cf-proxy -config /var/lib/multi-cf-proxy/config.json
+Restart=always
+RestartSec=5
+User=multi-cf-proxy
+Group=multi-cf-proxy
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+svc_start_and_wait() {
+  systemctl daemon-reload
+  systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
+  systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 8 ]; do
+    sleep 1
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+write_unit_hardened
+if svc_start_and_wait; then
+  log "服務已啟動並設為開機自啟（沙箱加固模式）"
 else
-  err "服務未正常啟動，最近日誌："
-  journalctl -u "$SERVICE_NAME" --no-pager -n 8 2>/dev/null || true
-  err "完整日誌：journalctl -u $SERVICE_NAME -e"
-  exit 1
+  warn "偵測到此環境不支援 systemd 沙箱選項（容器化 VPS 常見），改用相容模式…"
+  write_unit_compat
+  if svc_start_and_wait; then
+    log "服務已啟動並設為開機自啟（相容模式，未啟用沙箱加固）"
+  else
+    err "服務仍無法啟動，最近日誌："
+    journalctl -u "$SERVICE_NAME" --no-pager -n 10 2>/dev/null || true
+    err "建議改用 Docker 部署：docker run -d --name mcp --restart unless-stopped -p 1080:1080 -p 8080:8080 -p 8081:8081 -v /srv/mcp:/config ghcr.io/s12ryt/multi-cf-proxy:latest"
+    exit 1
+  fi
 fi
 
 PW_HINT=$(journalctl -u "$SERVICE_NAME" --no-pager 2>/dev/null | grep -o '密碼[^ ]*: *[A-Za-z0-9_-]*' | tail -n1 || true)
