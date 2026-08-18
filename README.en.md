@@ -107,7 +107,7 @@ automatically fail over to another healthy egress.
   "listen_socks5": ":1080",
   "listen_http": ":8080",
   "listen_web": ":8081",
-  "health_check": { "interval_seconds": 30, "failure_threshold": 3 },
+  "health_check": { "interval_seconds": 30, "failure_threshold": 3, "latency_discard_seconds": 0 },
   "upstreams": [
     {
       "id": "uXXXXXXXX",
