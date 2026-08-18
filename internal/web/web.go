@@ -256,31 +256,33 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	snap := s.stats.Snapshot()
 
 	type upView struct {
-		ID        string              `json:"id"`
-		Name      string              `json:"name"`
-		Enabled   bool                `json:"enabled"`
-		Username  string              `json:"username"`
-		Healthy   bool                `json:"healthy"`
-		LastCheck string              `json:"last_check"`
-		LastError string              `json:"last_error"`
-		Rebuilds  int64               `json:"rebuilds"`
-		Running   bool                `json:"running"`
-		Stats     stats.UpstreamStats `json:"stats"`
+		ID            string              `json:"id"`
+		Name          string              `json:"name"`
+		Enabled       bool                `json:"enabled"`
+		Username      string              `json:"username"`
+		Healthy       bool                `json:"healthy"`
+		LastCheck     string              `json:"last_check"`
+		LastLatencyMS int64               `json:"last_latency_ms"`
+		LastError     string              `json:"last_error"`
+		Rebuilds      int64               `json:"rebuilds"`
+		Running       bool                `json:"running"`
+		Stats         stats.UpstreamStats `json:"stats"`
 	}
 	ups := make([]upView, 0, len(c.Upstreams))
 	for _, u := range c.Upstreams {
 		st := states[u.ID]
 		ups = append(ups, upView{
-			ID:        u.ID,
-			Name:      u.Name,
-			Enabled:   u.Enabled,
-			Username:  u.Account.Username,
-			Healthy:   st.Healthy,
-			LastCheck: st.LastCheck.Format(time.RFC3339),
-			LastError: st.LastError,
-			Rebuilds:  st.Rebuilds,
-			Running:   st.Running,
-			Stats:     snap.Upstreams[u.ID],
+			ID:            u.ID,
+			Name:          u.Name,
+			Enabled:       u.Enabled,
+			Username:      u.Account.Username,
+			Healthy:       st.Healthy,
+			LastCheck:     st.LastCheck.Format(time.RFC3339),
+			LastLatencyMS: st.LastLatency.Milliseconds(),
+			LastError:     st.LastError,
+			Rebuilds:      st.Rebuilds,
+			Running:       st.Running,
+			Stats:         snap.Upstreams[u.ID],
 		})
 	}
 
@@ -521,10 +523,14 @@ func (s *Server) handleDeleteUpstream(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ListenSocks5 string                    `json:"listen_socks5"`
-		ListenHTTP   string                    `json:"listen_http"`
-		ListenWeb    string                    `json:"listen_web"`
-		Health       *config.HealthCheckConfig `json:"health"`
+		ListenSocks5 string `json:"listen_socks5"`
+		ListenHTTP   string `json:"listen_http"`
+		ListenWeb    string `json:"listen_web"`
+		Health       *struct {
+			IntervalSeconds       *int     `json:"interval_seconds"`
+			FailureThreshold      *int     `json:"failure_threshold"`
+			LatencyDiscardSeconds *float64 `json:"latency_discard_seconds"`
+		} `json:"health"`
 	}
 	if err := readJSON(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "請求格式錯誤"})
@@ -541,11 +547,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			c.ListenWeb = v
 		}
 		if body.Health != nil {
-			if body.Health.IntervalSeconds > 0 {
-				c.HealthCheck.IntervalSeconds = body.Health.IntervalSeconds
+			if body.Health.IntervalSeconds != nil {
+				c.HealthCheck.IntervalSeconds = *body.Health.IntervalSeconds
 			}
-			if body.Health.FailureThreshold > 0 {
-				c.HealthCheck.FailureThreshold = body.Health.FailureThreshold
+			if body.Health.FailureThreshold != nil {
+				c.HealthCheck.FailureThreshold = *body.Health.FailureThreshold
+			}
+			// 0 是明確的「停用」值；指標 nil 則表示請求未提供此欄位。
+			if body.Health.LatencyDiscardSeconds != nil {
+				c.HealthCheck.LatencyDiscardSeconds = *body.Health.LatencyDiscardSeconds
 			}
 		}
 		return nil

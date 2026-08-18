@@ -50,6 +50,7 @@ type testEnv struct {
 	srv      *httptest.Server
 	cfgPath  string
 	cfg      *config.Manager
+	tm       *tunnel.Manager
 	tunnels  map[string]*fakeTunnel
 	regCalls atomic.Int64
 	regErr   atomic.Value // error
@@ -75,7 +76,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		return 5 * time.Millisecond, nil
 	}, 30*time.Second, 3)
 
-	env := &testEnv{cfgPath: cfgPath, cfg: cfg, tunnels: tunnels}
+	env := &testEnv{cfgPath: cfgPath, cfg: cfg, tm: tm, tunnels: tunnels}
 	env.regCalls.Store(0)
 	register := func(ctx context.Context) (warp.Conf, error) {
 		n := env.regCalls.Add(1)
@@ -353,15 +354,29 @@ func TestSettingsUpdate(t *testing.T) {
 		"listen_socks5": ":2080",
 		"listen_http":   ":8080",
 		"listen_web":    ":8081",
-		"health":        map[string]int{"interval_seconds": 60, "failure_threshold": 2},
+		"health": map[string]any{
+			"interval_seconds":        60,
+			"failure_threshold":       2,
+			"latency_discard_seconds": 1.5,
+		},
 	}
 	resp, _ := e.do(t, "PUT", "/api/settings", body, &ck)
 	if resp.StatusCode != 200 {
 		t.Fatalf("settings 應 200, got %d", resp.StatusCode)
 	}
 	c := e.cfg.Get()
-	if c.ListenSocks5 != ":2080" || c.HealthCheck.IntervalSeconds != 60 {
+	if c.ListenSocks5 != ":2080" || c.HealthCheck.IntervalSeconds != 60 || c.HealthCheck.LatencyDiscardSeconds != 1.5 {
 		t.Errorf("設置未持久化: %+v", c)
+	}
+
+	// 舊版/部分客戶端只更新既有健康欄位時，不可默默清除新門檻。
+	partial := map[string]any{"health": map[string]int{"interval_seconds": 45}}
+	resp, _ = e.do(t, "PUT", "/api/settings", partial, &ck)
+	if resp.StatusCode != 200 {
+		t.Fatalf("部分健康設置應 200, got %d", resp.StatusCode)
+	}
+	if got := e.cfg.Get().HealthCheck.LatencyDiscardSeconds; got != 1.5 {
+		t.Errorf("省略欄位不應重置延遲門檻: got %v, want 1.5", got)
 	}
 
 	// 非法端口
@@ -369,6 +384,37 @@ func TestSettingsUpdate(t *testing.T) {
 	resp, _ = e.do(t, "PUT", "/api/settings", bad, &ck)
 	if resp.StatusCode != 400 {
 		t.Errorf("非法設置應 400, got %d", resp.StatusCode)
+	}
+
+	// 負的延遲丟棄門檻非法。
+	bad = map[string]any{"health": map[string]any{"latency_discard_seconds": -0.1}}
+	resp, _ = e.do(t, "PUT", "/api/settings", bad, &ck)
+	if resp.StatusCode != 400 {
+		t.Errorf("負的延遲門檻應 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestOverviewIncludesLastLatency(t *testing.T) {
+	e := newTestEnv(t)
+	ck := e.login(t)
+	resp, _ := e.do(t, "POST", "/api/upstreams/import", map[string]string{"conf": validConfText}, &ck)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("導入應成功: %d", resp.StatusCode)
+	}
+	id := e.cfg.Get().Upstreams[0].ID
+	e.tm.RecordProbe(id, nil, 123*time.Millisecond)
+
+	resp, body := e.do(t, "GET", "/api/overview", nil, &ck)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("overview 應成功: %d", resp.StatusCode)
+	}
+	ups, ok := body["upstreams"].([]any)
+	if !ok || len(ups) != 1 {
+		t.Fatalf("overview upstreams 格式錯誤: %#v", body["upstreams"])
+	}
+	up := ups[0].(map[string]any)
+	if got, ok := up["last_latency_ms"].(float64); !ok || got != 123 {
+		t.Errorf("last_latency_ms = %#v, want 123", up["last_latency_ms"])
 	}
 }
 
