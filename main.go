@@ -43,6 +43,7 @@ func main() {
 	tm := tunnel.NewManager(tunnel.WireFactory, tunnel.DefaultProbe,
 		time.Duration(c.HealthCheck.IntervalSeconds)*time.Second,
 		c.HealthCheck.FailureThreshold)
+	tm.SetLatencyMax(time.Duration(c.HealthCheck.LatencyDiscardSeconds * float64(time.Second)))
 	authStore := auth.NewStore(nil)
 	collector := stats.NewCollector()
 	svc := dispatcher.NewService(authStore, dispatcher.NewRegistry(tm), collector)
