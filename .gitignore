@@ -15,3 +15,6 @@ agent/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Playwright MCP 工具產物（瀏覽器驗證暫存）
+.playwright-mcp/
