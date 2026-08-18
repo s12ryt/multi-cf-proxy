@@ -22,6 +22,7 @@ type fakeTunnel struct {
 	rebuild atomic.Int64
 	stops   atomic.Int64
 	starts  atomic.Int64
+	dnsTTL  atomic.Value // time.Duration（SetDNSCacheTTL 收到的值）
 	dialErr error
 }
 
@@ -265,5 +266,118 @@ func TestStopAll(t *testing.T) {
 	m.StopAll()
 	if created[0].stops.Load() != 1 {
 		t.Error("StopAll 應停止全部隧道")
+	}
+}
+
+// --- v1.6 修復：Web「重建」按鈕繞過狀態機 ---
+
+// TestManagerManualRebuild 手動重建應走狀態機：計數 +1、重置健康狀態與錯誤。
+func TestManagerManualRebuild(t *testing.T) {
+	var created []*fakeTunnel
+	m := NewManager(fakeFactory(&created), nil, time.Hour, 3) // 不跑巡檢
+	ups := []*config.Upstream{mkUpstream("u1", true)}
+	if err := m.Sync(context.Background(), ups); err != nil {
+		t.Fatal(err)
+	}
+
+	// 打成不健康（3 連敗觸發自動重建，异步；手動重建以 rebuilding 互斥）
+	for i := 0; i < 3; i++ {
+		m.RecordProbe("u1", errors.New("probe fail"), 0)
+	}
+	st := m.States()["u1"]
+	if st.Healthy {
+		t.Fatal("前置條件：應已不健康")
+	}
+
+	if err := m.Rebuild(context.Background(), "u1"); err != nil {
+		t.Fatalf("手動重建失敗: %v", err)
+	}
+	st = m.States()["u1"]
+	if st.Rebuilds < 1 {
+		t.Errorf("手動重建應計入 Rebuilds, got %d", st.Rebuilds)
+	}
+	if !st.Healthy || st.ConsecutiveFails != 0 || st.LastError != "" {
+		t.Errorf("手動重建後應重置健康狀態: %+v", st)
+	}
+	if created[0].rebuild.Load() < 1 {
+		t.Error("底層隧道應被重建")
+	}
+}
+
+// TestManagerManualRebuildDisabled 停用的上游不可手動重建（避免喚醒 Manager 認為已停的隧道）。
+func TestManagerManualRebuildDisabled(t *testing.T) {
+	var created []*fakeTunnel
+	m := NewManager(fakeFactory(&created), nil, time.Hour, 3)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", false)}); err != nil {
+		t.Fatal(err)
+	}
+	err := m.Rebuild(context.Background(), "u1")
+	if !errors.Is(err, ErrTunnelNotRunning) {
+		t.Fatalf("停用上游應返回 ErrTunnelNotRunning, got %v", err)
+	}
+	if created[0].rebuild.Load() != 0 || created[0].starts.Load() != 0 {
+		t.Error("停用上游不應被觸碰")
+	}
+}
+
+// TestManagerManualRebuildMissing 不存在的上游返回 ErrTunnelNotFound。
+func TestManagerManualRebuildMissing(t *testing.T) {
+	m := NewManager(fakeFactory(&[]*fakeTunnel{}), nil, time.Hour, 3)
+	if err := m.Rebuild(context.Background(), "nope"); !errors.Is(err, ErrTunnelNotFound) {
+		t.Fatalf("應返回 ErrTunnelNotFound, got %v", err)
+	}
+}
+
+// --- v1.6 R3：獨立可調延遲探測循環 ---
+
+// TestLatencyProbeLoop 設定獨立探測間隔後，健康循環外另有更高頻探測（更新延遲）。
+func TestLatencyProbeLoop(t *testing.T) {
+	var created []*fakeTunnel
+	var probes atomic.Int64
+	probeFn := func(ctx context.Context, d Dialer) (time.Duration, error) {
+		probes.Add(1)
+		return 7 * time.Millisecond, nil
+	}
+	m := NewManager(fakeFactory(&created), probeFn, time.Hour, 3) // 健康循環 1h 不觸發
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+	m.SetLatencyProbeInterval(40 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for probes.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := probes.Load(); got < 3 {
+		t.Fatalf("獨立循環應更高頻探測, probes=%d", got)
+	}
+	st := m.States()["u1"]
+	if st.LastLatency != 7*time.Millisecond {
+		t.Errorf("LastLatency = %v, want 7ms", st.LastLatency)
+	}
+}
+
+// TestLatencyProbeDisabled 默認（未設定間隔）不啟動獨立循環。
+func TestLatencyProbeDisabled(t *testing.T) {
+	var created []*fakeTunnel
+	var probes atomic.Int64
+	probeFn := func(ctx context.Context, d Dialer) (time.Duration, error) {
+		probes.Add(1)
+		return time.Millisecond, nil
+	}
+	m := NewManager(fakeFactory(&created), probeFn, time.Hour, 3)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+	time.Sleep(200 * time.Millisecond)
+	if got := probes.Load(); got != 0 {
+		t.Fatalf("未設定間隔時不應有探測, probes=%d", got)
 	}
 }
