@@ -42,6 +42,14 @@ func TestIndexHTMLContract(t *testing.T) {
 		{"延遲過高丟棄設置鍵", "latency_discard_seconds"},
 		{"延遲過高丟棄設置輸入", "setLatency"},
 		{"延遲欄位", "延遲"},
+		// v1.6：撥號延遲量測 + DNS 快取 + 可調延遲探測
+		{"撥號延遲 p50 顯示鍵", "dial_p50_ms"},
+		{"撥號延遲 p95 顯示鍵", "dial_p95_ms"},
+		{"撥號延遲顯示欄", "撥號延遲"},
+		{"DNS 快取設置鍵", "dns_cache_seconds"},
+		{"DNS 快取設置輸入", "setDNSCache"},
+		{"延遲探測間隔設置鍵", "latency_probe_seconds"},
+		{"延遲探測間隔設置輸入", "setProbe"},
 	}
 	for _, m := range mustContain {
 		if !strings.Contains(html, m.substr) {

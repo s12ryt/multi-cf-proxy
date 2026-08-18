@@ -34,7 +34,7 @@
   .brand .sub{color:var(--dim);font-size:12px;font-family:var(--mono)}
 
   /* 摘要條 */
-  .stats-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+  .stats-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px}
   .stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
   .stat .k{color:var(--dim);font-size:11px;letter-spacing:.6px;text-transform:uppercase}
   .stat .v{font-size:22px;font-weight:700;font-family:var(--mono);margin-top:2px}
@@ -370,9 +370,14 @@ $('pw').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 /* ---------- 渲染（JSON diff：資料不變不重繪，避免閃爍/打斷選取） ---------- */
 let overview = null, lastJSON = '';
 async function refresh() {
-  let data;
-  try { data = await api('GET', '/api/overview'); } catch (e) { return; }
-  const j = JSON.stringify(data);
+  let data, statsData;
+  try {
+    [data, statsData] = await Promise.all([
+      api('GET', '/api/overview'),
+      api('GET', '/api/stats').catch(() => null),
+    ]);
+  } catch (e) { return; }
+  const j = JSON.stringify([data, statsData?.dial]);
   if (j === lastJSON) return;
   lastJSON = j;
   overview = data;
@@ -386,11 +391,17 @@ async function refresh() {
   const degraded = ups.filter(u => u.enabled && !u.healthy).length;
   const conns = (data.accounts || []).reduce((a, x) => a + (x.stats?.connections || 0), 0);
   const traffic = (data.accounts || []).reduce((a, x) => a + (x.stats?.up_bytes || 0) + (x.stats?.down_bytes || 0), 0);
+  const dial = statsData?.dial || {};
+  const dial_p50_ms = dial.p50_ms ?? 0, dial_p95_ms = dial.p95_ms ?? 0;
+  const dialCell = dial.count > 0
+    ? `<span class="mono">p50 ${dial_p50_ms} / p95 ${dial_p95_ms} ms</span>`
+    : '<span style="color:var(--faint)">—</span>';
   $('strip').innerHTML = `
     <div class="stat ok"><div class="k">健康上游</div><div class="v">${healthy}<span class="unit">/ ${ups.length}</span></div></div>
     <div class="stat ${degraded ? 'bad' : ''}"><div class="k">不健康</div><div class="v">${degraded}</div></div>
     <div class="stat"><div class="k">當前連接</div><div class="v">${conns}</div></div>
-    <div class="stat"><div class="k">累計流量</div><div class="v">${fmt(traffic)}</div></div>`;
+    <div class="stat"><div class="k">累計流量</div><div class="v">${fmt(traffic)}</div></div>
+    <div class="stat"><div class="k" title="經上游撥號的最近 ${dial.count || 0} 筆耗時分佈">撥號延遲</div><div class="v">${dialCell}</div></div>`;
 
   /* 上游表 */
   const tb = $('upTable').querySelector('tbody'); tb.innerHTML = '';
@@ -528,8 +539,12 @@ function openSettings() {
       <div><label for="setThreshold">失敗閾值（次）</label><input type="number" id="setThreshold" value="${s.health?.failure_threshold ?? 3}"></div>
       <div><label for="setLatency">延遲過高丟棄（秒，0=停用）</label><input type="number" id="setLatency" min="0" step="0.1" value="${s.health?.latency_discard_seconds ?? 0}"></div>
     </div>
+    <div class="row">
+      <div><label for="setProbe">延遲探測間隔（秒，0=隨健康檢查）</label><input type="number" id="setProbe" min="0" value="${s.health?.latency_probe_seconds ?? 0}"></div>
+      <div><label for="setDNSCache">DNS 快取（秒，0=停用）</label><input type="number" id="setDNSCache" min="0" value="${s.dns_cache_seconds ?? 60}"></div>
+    </div>
     <div style="margin-top:14px"><button class="ghost" id="btn-set" onclick="saveSettings()">保存設置</button></div>
-    <p class="hint">端口與健康參數保存後需重啟服務生效；延遲連續超標會視為探測失敗並重建。</p>
+    <p class="hint">端口與健康參數保存後需重啟服務生效；延遲連續超標會視為探測失敗並重建；域名 DNS 結果經 WARP 解析後於本機快取指定秒數（0=每次都解析）。</p>
     <hr style="border:none;border-top:1px solid var(--line);margin:18px 0 6px">
     <label for="newPw">修改管理員密碼（新密碼 ≥8 位）</label>
     <div class="row">
@@ -565,10 +580,12 @@ async function saveSettings() {
   try {
     await api('PUT', '/api/settings', {
       listen_socks5: $('setSocks').value, listen_http: $('setHttp').value, listen_web: $('setWeb').value,
+      dns_cache_seconds: parseInt($('setDNSCache').value || '60'),
       health: {
         interval_seconds: parseInt($('setInterval').value || '30'),
         failure_threshold: parseInt($('setThreshold').value || '3'),
         latency_discard_seconds: parseFloat($('setLatency').value || '0'),
+        latency_probe_seconds: parseInt($('setProbe').value || '0'),
       },
     });
     toast(true, '已保存（重啟後生效）');
