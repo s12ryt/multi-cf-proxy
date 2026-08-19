@@ -636,3 +636,31 @@ func TestAutoRebuildFlagLifecycle(t *testing.T) {
 }
 
 var errProbeFail = errors.New("probe fail")
+
+// TestProbeAllParallel probeAll 應並行探測：3 條隧道各 300ms 探測，
+// 串行需 ≥900ms；並行應 <600ms（閾值留有 CI 慢機餘裕）且全部生效。
+func TestProbeAllParallel(t *testing.T) {
+	var created []*fakeTunnel
+	probe := func(ctx context.Context, d Dialer) (time.Duration, error) {
+		time.Sleep(300 * time.Millisecond)
+		return 250 * time.Millisecond, nil
+	}
+	m := NewManager(fakeFactory(&created), probe, 30*time.Second, 3)
+	ups := []*config.Upstream{mkUpstream("u1", true), mkUpstream("u2", true), mkUpstream("u3", true)}
+	if err := m.Sync(context.Background(), ups); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	m.probeAll(context.Background())
+	elapsed := time.Since(start)
+
+	if elapsed >= 600*time.Millisecond {
+		t.Errorf("並行探測整輪應 <600ms（串行需 ≥900ms）, got %v", elapsed)
+	}
+	for _, id := range []string{"u1", "u2", "u3"} {
+		if st := m.States()[id]; st.LastLatency != 250*time.Millisecond {
+			t.Errorf("隧道 %s 延遲未記錄: %+v", id, st)
+		}
+	}
+}

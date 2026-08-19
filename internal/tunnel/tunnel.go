@@ -511,12 +511,20 @@ func (m *Manager) probeAll(ctx context.Context) {
 	if probeTimeout <= 0 || probeTimeout > 8*time.Second {
 		probeTimeout = 8 * time.Second
 	}
+	// 並行探測：串行會讓單輪最壞 N×timeout，隧道多時健康/延遲數據嚴重滯後。
+	// RecordProbe 內部持鎖，併發安全。
+	var wg sync.WaitGroup
 	for _, id := range ids {
-		pctx, cancel := context.WithTimeout(ctx, probeTimeout)
-		latency, err := m.probe(pctx, dialers[id])
-		cancel()
-		m.RecordProbe(id, err, latency)
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+			latency, err := m.probe(pctx, dialers[id])
+			cancel()
+			m.RecordProbe(id, err, latency)
+		}(id)
 	}
+	wg.Wait()
 }
 
 // StopAll 停止全部隧道（進程退出用）。
