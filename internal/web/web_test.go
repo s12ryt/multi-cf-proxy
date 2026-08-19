@@ -54,6 +54,7 @@ func (f *fakeTunnel) DialContext(ctx context.Context, network, addr string) (net
 
 type testEnv struct {
 	srv      *httptest.Server
+	webSrv   *Server
 	cfgPath  string
 	cfg      *config.Manager
 	tm       *tunnel.Manager
@@ -101,6 +102,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	s := New(cfg, tm, auth.NewStore(nil), env.st, register)
+	env.webSrv = s
 	env.srv = httptest.NewServer(s.Handler())
 	t.Cleanup(env.srv.Close)
 
@@ -116,6 +118,11 @@ func base64Key(n int) string {
 		b[i] = byte(n + i)
 	}
 	return base64.StdEncoding.EncodeToString(b)
+}
+
+// SetApplier 注入設置套用器樁（轉發給 Server）。
+func (e *testEnv) SetApplier(f func(c *config.Config) []string) {
+	e.webSrv.SetApplier(f)
 }
 
 func (e *testEnv) adminPassword() string { return e.cfg.Get().AdminPassword }
@@ -604,5 +611,68 @@ func TestRebuildEndpointSemantics(t *testing.T) {
 	}
 	if e.tunnels["uon"].rebuilds.Load() < 1 {
 		t.Error("啟用上游應被重建")
+	}
+}
+
+func TestSettingsRoutingAndApplier(t *testing.T) {
+	e := newTestEnv(t)
+	ck := e.login(t)
+
+	var appliedCount atomic.Int64
+	var appliedCfg *config.Config
+	e.SetApplier(func(c *config.Config) []string {
+		appliedCfg = c
+		appliedCount.Add(1)
+		return []string{"測試報告"}
+	})
+
+	// routing 設置保存 + applier 觸發
+	body := map[string]any{
+		"routing": map[string]any{"prefer_lowest_latency": true, "switch_margin_ms": 35},
+	}
+	resp, jbody := e.do(t, "PUT", "/api/settings", body, &ck)
+	if resp.StatusCode != 200 {
+		t.Fatalf("routing 設置應 200, got %d", resp.StatusCode)
+	}
+	if appliedCount.Load() != 1 {
+		t.Errorf("applier 應被調用一次, got %d", appliedCount.Load())
+	}
+	if appliedCfg == nil || !appliedCfg.Routing.PreferLowestLatency || appliedCfg.Routing.SwitchMarginMS != 35 {
+		t.Errorf("applier 應收到保存後的新配置: %+v", appliedCfg)
+	}
+	if note, _ := jbody["note"].(string); strings.Contains(note, "重啟") {
+		t.Errorf("回應不應再提示重啟: %q", note)
+	}
+	applied, _ := jbody["applied"].([]any)
+	if len(applied) != 1 {
+		t.Errorf("回應 applied 應包含套用報告, got %#v", jbody["applied"])
+	}
+
+	// 部分更新：只改 margin（顯式 0 停用防抖），prefer 保持
+	if resp, _ = e.do(t, "PUT", "/api/settings", map[string]any{"routing": map[string]any{"switch_margin_ms": 0}}, &ck); resp.StatusCode != 200 {
+		t.Fatalf("部分 routing 更新應 200, got %d", resp.StatusCode)
+	}
+	got := e.cfg.Get().Routing
+	if !got.PreferLowestLatency || got.SwitchMarginMS != 0 {
+		t.Errorf("部分更新語意錯誤: %+v", got)
+	}
+
+	// 負容差拒絕
+	if resp, _ = e.do(t, "PUT", "/api/settings", map[string]any{"routing": map[string]any{"switch_margin_ms": -5}}, &ck); resp.StatusCode != 400 {
+		t.Errorf("負容差應 400, got %d", resp.StatusCode)
+	}
+
+	// overview 暴露 routing
+	resp, jbody = e.do(t, "GET", "/api/overview", nil, &ck)
+	if resp.StatusCode != 200 {
+		t.Fatalf("overview 應 200")
+	}
+	s, _ := jbody["settings"].(map[string]any)
+	rt, _ := s["routing"].(map[string]any)
+	if v, _ := rt["prefer_lowest_latency"].(bool); !v {
+		t.Errorf("overview routing.prefer_lowest_latency = %#v, want true", rt["prefer_lowest_latency"])
+	}
+	if v, _ := rt["switch_margin_ms"].(float64); v != 0 {
+		t.Errorf("overview routing.switch_margin_ms = %#v, want 0", rt["switch_margin_ms"])
 	}
 }

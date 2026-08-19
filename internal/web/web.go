@@ -34,6 +34,7 @@ type Server struct {
 	authStore *auth.Store
 	stats     *stats.Collector
 	register  func(ctx context.Context) (warp.Conf, error)
+	applier   func(c *config.Config) []string // 設置保存後的運行時套用器（main 注入；nil = 不套用）
 
 	mu       sync.Mutex
 	sessions map[string]time.Time
@@ -53,6 +54,12 @@ func New(cfg *config.Manager, tm *tunnel.Manager, authStore *auth.Store, st *sta
 		register:  register,
 		sessions:  map[string]time.Time{},
 	}
+}
+
+// SetApplier 注入設置套用器：設置保存成功後以新配置調用，
+// 返回逐項套用報告（展示給管理員；空 = 無需套用）。
+func (s *Server) SetApplier(f func(c *config.Config) []string) {
+	s.applier = f
 }
 
 // Handler 組裝路由。
@@ -310,6 +317,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			"listen_web":        c.ListenWeb,
 			"dns_cache_seconds": c.DNSCacheSeconds,
 			"health":            c.HealthCheck,
+			"routing":           c.Routing,
 		},
 	})
 }
@@ -537,6 +545,10 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			LatencyDiscardSeconds *float64 `json:"latency_discard_seconds"`
 			LatencyProbeSeconds   *int     `json:"latency_probe_seconds"` // 0 = 隨健康檢查
 		} `json:"health"`
+		Routing *struct {
+			PreferLowestLatency *bool `json:"prefer_lowest_latency"`
+			SwitchMarginMS      *int  `json:"switch_margin_ms"` // 顯式 0 = 停用防抖；nil = 不變
+		} `json:"routing"`
 	}
 	if err := readJSON(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "請求格式錯誤"})
@@ -570,13 +582,30 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				c.HealthCheck.LatencyProbeSeconds = *body.Health.LatencyProbeSeconds
 			}
 		}
+		if body.Routing != nil {
+			if body.Routing.PreferLowestLatency != nil {
+				c.Routing.PreferLowestLatency = *body.Routing.PreferLowestLatency
+			}
+			if body.Routing.SwitchMarginMS != nil {
+				c.Routing.SwitchMarginMS = *body.Routing.SwitchMarginMS
+			}
+		}
 		return c.Validate()
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"note": "端口與健康參數已保存，重啟服務後生效"})
+
+	// 保存成功 → 立即套用運行時（main 注入的冪等套用器）
+	applied := []string{}
+	if s.applier != nil {
+		applied = s.applier(s.cfg.Get())
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"note":    "設置已保存並即時生效",
+		"applied": applied,
+	})
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
