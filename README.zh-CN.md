@@ -14,6 +14,7 @@
 - **多 WARP 实例**：用户态 WireGuard（wireguard-go + gVisor netstack），无需 TUN 设备、无需 root
 - **双协议入站**：SOCKS5（RFC 1928/1929，仅账号密码认证）与 HTTP 代理（Basic + CONNECT），各一端口
 - **账号绑出口**：每新增上游自动分配「随机用户名 + 随机密码」；绑定出口不健康时自动 failover 到其他健康出口
+- **延迟优选**：备援按最近探测延迟排序（快者先试）；可选「全局延迟优先」模式——各账号黏住最快健康出口，仅当其他上游快超过容差时才漂移
 - **全自动重连**：周期健康探测（经隧道访问 Cloudflare trace）→ 连续失败达阈值 → 标记不健康并自动重建隧道 → 恢复后自动回到健康池
 - **流量统计**：每账号 / 每上游的上下行字节数，IPv4 / IPv6 分开
 - **Web 管理**：管理员密码登录（session），上游增删改、WARP 账号自动注册、手动导入 wgcf 配置、换账号密码、设置、统计
@@ -100,6 +101,7 @@ curl -x http://warp-xxxx:PASSWORD@VPS:8080 https://www.cloudflare.com/cdn-cgi/tr
   "listen_http": ":8080",
   "listen_web": ":8081",
   "dns_cache_seconds": 60,
+  "routing": { "prefer_lowest_latency": false, "switch_margin_ms": 20 },
   "health_check": { "interval_seconds": 30, "failure_threshold": 3, "latency_discard_seconds": 0, "latency_probe_seconds": 0 },
   "upstreams": [
     {
@@ -116,7 +118,7 @@ curl -x http://warp-xxxx:PASSWORD@VPS:8080 https://www.cloudflare.com/cdn-cgi/tr
 }
 ```
 
-Web 上的所有修改即时写盘（原子写入）；端口与健康参数修改后重启生效。
+Web 上的所有修改即时写盘（原子写入）并**即时生效**——含端口（热切换：先绑新再关旧，失败沿用旧地址）、健康参数、DNS 缓存与延迟优选；仅变更 Web 监听地址后需以新地址重新打开管理页。
 
 ## 架构
 
@@ -136,7 +138,7 @@ internal/web        管理 API（session）+ 嵌入式前端
 
 - SOCKS5 UDP ASSOCIATE 不支持（仅 TCP CONNECT）
 - WARP 自动注册依赖 Cloudflare API 可用性；被风控时请用 wgcf 手动注册后导入配置
-- 端口 / 健康参数修改需重启生效
+- 全局延迟优先模式下出口 IP 会随延迟漂移而变（需 IP 稳定的网站 session 请保持关闭）
 - 账号密码仅在生成时完整显示一次（概览页不回显）
 
 ## 开发

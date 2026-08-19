@@ -17,6 +17,7 @@ active health checks, automatic tunnel rebuilds, egress failover and traffic acc
 - **Multiple WARP instances**: userspace WireGuard (wireguard-go + gVisor netstack) — no TUN device, no root
 - **Dual-protocol inbound**: SOCKS5 (RFC 1928/1929, username/password auth only) and HTTP proxy (Basic + CONNECT) on separate ports
 - **Credential-bound egress**: every upstream gets an auto-generated random `username:password`; if the bound egress goes unhealthy, traffic fails over to other healthy egresses
+- **Latency-preferred routing**: failover candidates are ordered by latest probe latency (fastest first); optional "global lowest-latency" mode — each account sticks to the fastest healthy egress and only drifts when another egress is faster by more than the switch margin
 - **Fully automatic reconnection**: periodic health probes (Cloudflare trace via tunnel) → consecutive failures reach threshold → marked unhealthy, tunnel auto-rebuilt → returns to the healthy pool once probes recover
 - **Traffic accounting**: per-account / per-upstream up/down bytes, IPv4 / IPv6 separated
 - **Web admin**: admin-password login (session), upstream CRUD, automatic WARP account registration, manual wgcf config import, credential regeneration, settings, stats
@@ -108,6 +109,7 @@ automatically fail over to another healthy egress.
   "listen_http": ":8080",
   "listen_web": ":8081",
   "dns_cache_seconds": 60,
+  "routing": { "prefer_lowest_latency": false, "switch_margin_ms": 20 },
   "health_check": { "interval_seconds": 30, "failure_threshold": 3, "latency_discard_seconds": 0, "latency_probe_seconds": 0 },
   "upstreams": [
     {
@@ -124,8 +126,11 @@ automatically fail over to another healthy egress.
 }
 ```
 
-Every change made in the web UI is persisted immediately (atomic writes);
-port and health-check changes take effect after restart.
+Every change made in the web UI is persisted immediately (atomic writes) and
+**applied at once** — including ports (hot swap: bind new listener first, close old
+only on success; on failure the old address stays), health-check parameters, DNS
+cache and latency-preferred routing. Only a changed web listen address requires
+reopening the admin page at the new address.
 
 ## Architecture
 
@@ -145,7 +150,7 @@ internal/web        admin API (session) + embedded frontend
 
 - SOCKS5 UDP ASSOCIATE is not supported (TCP CONNECT only)
 - Automatic WARP registration depends on Cloudflare API availability; when rate-limited, register manually with wgcf and import the config
-- Port / health-check parameter changes require a restart
+- In global lowest-latency mode the egress IP drifts as latencies change (keep it off if you need a stable IP for website sessions)
 - Account passwords are shown in full only once at generation time (never echoed on the overview page)
 
 ## Development
