@@ -18,7 +18,7 @@ active health checks, automatic tunnel rebuilds, egress failover and traffic acc
 - **Dual-protocol inbound**: SOCKS5 (RFC 1928/1929, username/password auth only) and HTTP proxy (Basic + CONNECT) on separate ports
 - **Credential-bound egress**: every upstream gets an auto-generated random `username:password`; if the bound egress goes unhealthy, traffic fails over to other healthy egresses
 - **Latency-preferred routing**: failover candidates are ordered by EMA-smoothed probe latency (fastest first); optional "global lowest-latency" mode — every account is routed to the currently lowest-latency healthy egress (dial failures fall through in latency order)
-- **Fully automatic reconnection**: periodic health probes (Cloudflare trace at 1.1.1.1 via tunnel — IP-direct, no DNS, measures pure path latency) → consecutive failures reach threshold → marked unhealthy, tunnel auto-rebuilt → returns to the healthy pool once probes recover
+- **Fully automatic reconnection**: periodic health probes (Cloudflare trace at 1.1.1.1 via tunnel; keep-alive steady-state timing ≈1×RTT matching real connections, cold path still fully verified each round) → consecutive failures reach threshold → marked unhealthy, tunnel auto-rebuilt → returns to the healthy pool once probes recover
 - **Traffic accounting**: per-account / per-upstream up/down bytes, IPv4 / IPv6 separated
 - **Web admin**: admin-password login (session), upstream CRUD, automatic WARP account registration, manual wgcf config import, credential regeneration, settings, stats
 - **Single static binary**: written in Go, cross-compiles to Linux amd64/arm64, no runtime dependencies
