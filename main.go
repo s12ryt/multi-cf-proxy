@@ -6,12 +6,12 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -19,11 +19,38 @@ import (
 	"multi-cf-proxy/internal/config"
 	"multi-cf-proxy/internal/dispatcher"
 	"multi-cf-proxy/internal/inbound"
+	"multi-cf-proxy/internal/listen"
 	"multi-cf-proxy/internal/stats"
 	"multi-cf-proxy/internal/tunnel"
 	"multi-cf-proxy/internal/warp"
 	"multi-cf-proxy/internal/web"
 )
+
+// runtimeSnap 運行時套用器的差異快照（全部可比較欄位）。
+type runtimeSnap struct {
+	interval  int
+	threshold int
+	discard   float64
+	probe     int
+	dns       int
+	prefer    bool
+	margin    int
+	socks     string
+	httpA     string
+	webA      string
+}
+
+// healthKey 健康類四項的比較鍵。
+type healthKey struct {
+	interval  int
+	threshold int
+	discard   float64
+	probe     int
+}
+
+func (s runtimeSnap) health() healthKey {
+	return healthKey{s.interval, s.threshold, s.discard, s.probe}
+}
 
 func main() {
 	configPath := flag.String("config", "config.json", "配置文件路徑")
@@ -55,8 +82,86 @@ func main() {
 	authStore := auth.NewStore(nil)
 	collector := stats.NewCollector()
 	svc := dispatcher.NewService(authStore, dispatcher.NewRegistry(tm), collector)
+	svc.SetLatencyRouting(c.Routing.PreferLowestLatency, time.Duration(c.Routing.SwitchMarginMS)*time.Millisecond)
+
+	// 三個監聽服務（支持端口熱重載）
+	ls := listen.New()
+	if err := ls.Start("SOCKS5", c.ListenSocks5, func(ln net.Listener) error {
+		return inbound.NewSOCKS5(svc).Serve(ln)
+	}); err != nil {
+		log.Fatal(err)
+	}
+	if err := ls.Start("HTTP", c.ListenHTTP, func(ln net.Listener) error {
+		return inbound.NewHTTP(svc).Serve(ln)
+	}); err != nil {
+		log.Fatal(err)
+	}
 
 	webSrv := web.New(cfg, tm, authStore, collector, warp.NewClient().Register)
+	if err := ls.Start("Web", c.ListenWeb, func(ln net.Listener) error {
+		return http.Serve(ln, webSrv.Handler())
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	// 冪等套用器：設置保存後按差異熱套運行時（health/dns/routing/端口）
+	var snap atomic.Value
+	snapOf := func(c *config.Config) runtimeSnap {
+		return runtimeSnap{
+			interval:  c.HealthCheck.IntervalSeconds,
+			threshold: c.HealthCheck.FailureThreshold,
+			discard:   c.HealthCheck.LatencyDiscardSeconds,
+			probe:     c.HealthCheck.LatencyProbeSeconds,
+			dns:       c.DNSCacheSeconds,
+			prefer:    c.Routing.PreferLowestLatency,
+			margin:    c.Routing.SwitchMarginMS,
+			socks:     c.ListenSocks5,
+			httpA:     c.ListenHTTP,
+			webA:      c.ListenWeb,
+		}
+	}
+	snap.Store(snapOf(c))
+	webSrv.SetApplier(func(c *config.Config) []string {
+		cur, _ := snap.Load().(runtimeSnap)
+		next := snapOf(c)
+		var notes []string
+		if cur.health() != next.health() {
+			tm.ApplyHealth(
+				time.Duration(next.interval)*time.Second,
+				next.threshold,
+				time.Duration(next.discard*float64(time.Second)),
+				time.Duration(next.probe)*time.Second,
+			)
+			notes = append(notes, "健康檢查/延遲參數已即時套用")
+		}
+		if cur.dns != next.dns {
+			if err := tm.SetDNSCacheTTL(time.Duration(next.dns) * time.Second); err != nil {
+				notes = append(notes, "DNS 快取套用失敗: "+err.Error())
+			} else {
+				notes = append(notes, "DNS 快取已即時套用")
+			}
+		}
+		if cur.prefer != next.prefer || cur.margin != next.margin {
+			svc.SetLatencyRouting(next.prefer, time.Duration(next.margin)*time.Millisecond)
+			notes = append(notes, "延遲優選已即時套用")
+		}
+		for _, sw := range []struct{ name, cur, next string }{
+			{"SOCKS5", cur.socks, next.socks},
+			{"HTTP", cur.httpA, next.httpA},
+			{"Web", cur.webA, next.webA},
+		} {
+			if sw.cur != sw.next {
+				if err := ls.Swap(sw.name, sw.next); err != nil {
+					notes = append(notes, sw.name+" 端口套用失敗: "+err.Error())
+				} else {
+					notes = append(notes, sw.name+" 已切換到 "+sw.next)
+				}
+			}
+		}
+		snap.Store(next)
+		return notes
+	})
+
 	if err := webSrv.SyncNow(context.Background()); err != nil {
 		log.Printf("警告: 初始隧道同步失敗: %v", err)
 	}
@@ -67,21 +172,10 @@ func main() {
 	// 健康巡檢循環
 	go tm.Run(ctx)
 
-	// 三個監聽服務
-	errCh := make(chan error, 3)
-	startListener("SOCKS5", c.ListenSocks5, func(ln net.Listener) error {
-		return inbound.NewSOCKS5(svc).Serve(ln)
-	}, errCh)
-	startListener("HTTP", c.ListenHTTP, func(ln net.Listener) error {
-		return inbound.NewHTTP(svc).Serve(ln)
-	}, errCh)
-	startListener("Web", c.ListenWeb, func(ln net.Listener) error {
-		return http.Serve(ln, webSrv.Handler())
-	}, errCh)
-
 	log.Printf("多開CF代理已啟動：SOCKS5=%s HTTP=%s Web=%s（上游 %d 個）",
 		c.ListenSocks5, c.ListenHTTP, c.ListenWeb, len(c.Upstreams))
 
+	errCh := ls.ErrCh()
 	select {
 	case <-ctx.Done():
 		log.Println("收到退出信號，正在關閉…")
@@ -93,17 +187,4 @@ func main() {
 
 	tm.StopAll()
 	log.Println("已退出")
-}
-
-// startListener 啟動一個 TCP 監聽；失敗直接終止進程。
-func startListener(name, addr string, serve func(net.Listener) error, errCh chan error) {
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Fatalf("監聽 %s（%s）失敗: %v", name, addr, err)
-	}
-	go func() {
-		if err := serve(ln); err != nil {
-			errCh <- fmt.Errorf("%s: %w", name, err)
-		}
-	}()
 }
