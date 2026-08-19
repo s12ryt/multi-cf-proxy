@@ -17,7 +17,7 @@ active health checks, automatic tunnel rebuilds, egress failover and traffic acc
 - **Multiple WARP instances**: userspace WireGuard (wireguard-go + gVisor netstack) — no TUN device, no root
 - **Dual-protocol inbound**: SOCKS5 (RFC 1928/1929, username/password auth only) and HTTP proxy (Basic + CONNECT) on separate ports
 - **Credential-bound egress**: every upstream gets an auto-generated random `username:password`; if the bound egress goes unhealthy, traffic fails over to other healthy egresses
-- **Latency-preferred routing**: failover candidates are ordered by latest probe latency (fastest first); optional "global lowest-latency" mode — each account sticks to the fastest healthy egress and only drifts when another egress is faster by more than the switch margin
+- **Latency-preferred routing**: failover candidates are ordered by probe latency (fastest first; latency is EMA-smoothed so a one-off DNS/TLS jitter cannot cause egress flapping); optional "global lowest-latency" mode — each account sticks to the fastest healthy egress and only drifts when another egress is faster by more than the switch margin
 - **Fully automatic reconnection**: periodic health probes (Cloudflare trace via tunnel) → consecutive failures reach threshold → marked unhealthy, tunnel auto-rebuilt → returns to the healthy pool once probes recover
 - **Traffic accounting**: per-account / per-upstream up/down bytes, IPv4 / IPv6 separated
 - **Web admin**: admin-password login (session), upstream CRUD, automatic WARP account registration, manual wgcf config import, credential regeneration, settings, stats
