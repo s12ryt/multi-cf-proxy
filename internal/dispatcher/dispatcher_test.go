@@ -50,7 +50,9 @@ func (r *stubRegistry) Bound(id string) (tunnel.Tunnel, bool) {
 	t, ok := r.bound[id]
 	return t, ok
 }
-func (r *stubRegistry) Healthy() []tunnel.Tunnel { return r.healthy }
+func (r *stubRegistry) Healthy() []tunnel.Tunnel                  { return r.healthy }
+func (r *stubRegistry) HealthySortedByLatency() []tunnel.Tunnel   { return r.healthy }
+func (r *stubRegistry) LatencyOf(id string) (time.Duration, bool) { return 0, false }
 func (r *stubRegistry) IsHealthy(id string) bool {
 	return r.health[id]
 }
@@ -276,5 +278,234 @@ func TestRouteDialFailNoSample(t *testing.T) {
 	}
 	if d := col.Snapshot().Dial; d.Count != 0 {
 		t.Errorf("失敗撥號不應記錄樣本, got Count=%d", d.Count)
+	}
+}
+
+// --- v1.6.5：延遲優選路由（備援排序 + 全域優先 + 黏住/容差） ---
+
+// latRegistry 在 stubRegistry 上附加延遲資訊（HealthySortedByLatency 由測試排列）。
+type latRegistry struct {
+	stubRegistry
+	sorted    []tunnel.Tunnel
+	latencies map[string]time.Duration
+}
+
+func (r *latRegistry) HealthySortedByLatency() []tunnel.Tunnel { return r.sorted }
+func (r *latRegistry) LatencyOf(id string) (time.Duration, bool) {
+	d, ok := r.latencies[id]
+	return d, ok
+}
+
+func newLatService(t *testing.T) (*Service, *latRegistry) {
+	t.Helper()
+	u1 := &stubTunnel{id: "u1"}
+	u2 := &stubTunnel{id: "u2"}
+	reg := &latRegistry{
+		stubRegistry: stubRegistry{
+			bound:   map[string]tunnel.Tunnel{"u1": u1, "u2": u2},
+			healthy: []tunnel.Tunnel{u1, u2},
+			health:  map[string]bool{"u1": true, "u2": true},
+		},
+		sorted:    []tunnel.Tunnel{u2, u1},
+		latencies: map[string]time.Duration{"u1": 100 * time.Millisecond, "u2": 50 * time.Millisecond},
+	}
+	return mkService(t, reg), reg
+}
+
+// TestFallbackSortedByLatency 綁定不健康需 failover 時，備援按延遲排序（非配置順序）。
+func TestFallbackSortedByLatency(t *testing.T) {
+	svc, reg := newLatService(t)
+	reg.health["u1"] = false
+	reg.healthy = []tunnel.Tunnel{reg.bound["u2"]}
+	reg.sorted = []tunnel.Tunnel{reg.bound["u2"]}
+
+	// 帳號 warp-aaaa 綁 u1（不健康）→ 備援只有 u2
+	conn, used, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if used != "u2" {
+		t.Errorf("應 failover 到 u2, got %s", used)
+	}
+
+	// 綁定 u1 仍不健康；新增更快的 u3（30ms）→ 備援按延遲先試 u3（非配置順序 u2）
+	u3 := &stubTunnel{id: "u3"}
+	reg.bound["u3"] = u3
+	reg.health["u3"] = true
+	reg.latencies["u3"] = 30 * time.Millisecond
+	reg.healthy = []tunnel.Tunnel{reg.bound["u2"], u3} // 配置順序：u2 在前
+	reg.sorted = []tunnel.Tunnel{u3, reg.bound["u2"]}  // 延遲排序：u3 在前
+	conn, used, err = svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if used != "u3" {
+		t.Errorf("備援應按延遲排序先試 u3（更快）, got %s", used)
+	}
+
+	// 綁定 u1 恢復健康 → 回到綁定優先（不因延遲排序動搖）
+	reg.health["u1"] = true
+	reg.healthy = []tunnel.Tunnel{reg.bound["u1"], reg.bound["u2"], u3}
+	conn, used, err = svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if used != "u1" {
+		t.Errorf("綁定上游恢復健康應回到綁定 u1, got %s", used)
+	}
+}
+
+// TestGlobalPreferInitialFastest 全域模式：初始目標＝當前最快（不論綁定）。
+func TestGlobalPreferInitialFastest(t *testing.T) {
+	svc, _ := newLatService(t)
+	svc.SetLatencyRouting(true, 20*time.Millisecond)
+
+	conn, used, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if used != "u2" {
+		t.Errorf("全域模式初始應走最快 u2（warp-aaaa 原綁 u1）, got %s", used)
+	}
+}
+
+// TestGlobalStickyWithinMargin 容差內黏住：快不到容差（5ms < 20ms）不切換。
+func TestGlobalStickyWithinMargin(t *testing.T) {
+	svc, reg := newLatService(t)
+	svc.SetLatencyRouting(true, 20*time.Millisecond)
+
+	conn, _, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+
+	// u1 提速到 45ms（比黏住的 u2=50ms 快 5ms，未超容差）→ 仍走 u2
+	reg.latencies["u1"] = 45 * time.Millisecond
+	reg.sorted = []tunnel.Tunnel{reg.bound["u1"], reg.bound["u2"]}
+	conn, used, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if used != "u2" {
+		t.Errorf("容差內應黏住 u2, got %s", used)
+	}
+}
+
+// TestGlobalDriftBeyondMargin 超過容差（40ms > 20ms）漂移到更快上游。
+func TestGlobalDriftBeyondMargin(t *testing.T) {
+	svc, reg := newLatService(t)
+	svc.SetLatencyRouting(true, 20*time.Millisecond)
+
+	conn, _, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+
+	reg.latencies["u1"] = 10 * time.Millisecond
+	reg.sorted = []tunnel.Tunnel{reg.bound["u1"], reg.bound["u2"]}
+	conn, used, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if used != "u1" {
+		t.Errorf("超容差應漂移到 u1, got %s", used)
+	}
+}
+
+// TestGlobalStickyUnhealthySwitch 黏住上游不健康時立即改選最快（不受容差限制）。
+func TestGlobalStickyUnhealthySwitch(t *testing.T) {
+	svc, reg := newLatService(t)
+	svc.SetLatencyRouting(true, 20*time.Millisecond)
+
+	conn, _, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+
+	reg.health["u2"] = false
+	reg.healthy = []tunnel.Tunnel{reg.bound["u1"]}
+	reg.sorted = []tunnel.Tunnel{reg.bound["u1"]}
+	conn, used, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if used != "u1" {
+		t.Errorf("黏住上游不健康應立即切最快 u1, got %s", used)
+	}
+}
+
+// TestGlobalMarginZeroAlwaysSwitch margin=0 停用防抖：任何更快即切。
+func TestGlobalMarginZeroAlwaysSwitch(t *testing.T) {
+	svc, reg := newLatService(t)
+	svc.SetLatencyRouting(true, 0)
+
+	conn, _, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+
+	reg.latencies["u1"] = 49 * time.Millisecond // 僅快 1ms
+	reg.sorted = []tunnel.Tunnel{reg.bound["u1"], reg.bound["u2"]}
+	conn, used, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if used != "u1" {
+		t.Errorf("margin=0 時任何更快都應切換, got %s", used)
+	}
+}
+
+// TestGlobalDialFailFallsToNext 黏住目標撥號失敗時按延遲序落到下一個。
+func TestGlobalDialFailFallsToNext(t *testing.T) {
+	svc, reg := newLatService(t)
+	svc.SetLatencyRouting(true, 20*time.Millisecond)
+
+	conn, _, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+
+	reg.bound["u2"].(*stubTunnel).dialErr.Store(errors.New("broken"))
+	conn, used, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if used != "u1" {
+		t.Errorf("黏住上游撥號失敗應落到 u1, got %s", used)
+	}
+}
+
+// TestSetLatencyRoutingToggleOff 關閉全域模式回到綁定行為。
+func TestSetLatencyRoutingToggleOff(t *testing.T) {
+	svc, _ := newLatService(t)
+	svc.SetLatencyRouting(true, 20*time.Millisecond)
+	conn, used, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil || used != "u2" {
+		t.Fatalf("前置：全域模式應走 u2, got %s (%v)", used, err)
+	}
+	conn.Close()
+
+	svc.SetLatencyRouting(false, 20*time.Millisecond)
+	conn, used, err = svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if used != "u1" {
+		t.Errorf("關閉全域模式應回到綁定 u1, got %s", used)
 	}
 }
