@@ -114,6 +114,18 @@ func (s *Service) rememberSticky(username, upstreamID string) {
 	s.rmu.Unlock()
 }
 
+// EgressSnapshot 返回全域延遲優先模式下各帳號實際使用的出口映射（冪等快照）。
+// 非全域模式返回空 map（帳號出口即其綁定上游，無漂移概念）。
+func (s *Service) EgressSnapshot() map[string]string {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
+	out := make(map[string]string, len(s.sticky))
+	for u, id := range s.sticky {
+		out[u] = id
+	}
+	return out
+}
+
 // candidates 生成嘗試順序：
 //   - 默認：綁定上游健康時優先；備援清單按最近探測延遲升序（快者先試）。
 //   - 全域延遲優先：忽略綁定，每帳號黏住當前出口；僅當其他上游快超過容差

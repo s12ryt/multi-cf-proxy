@@ -509,3 +509,30 @@ func TestSetLatencyRoutingToggleOff(t *testing.T) {
 		t.Errorf("關閉全域模式應回到綁定 u1, got %s", used)
 	}
 }
+
+func TestEgressSnapshot(t *testing.T) {
+	svc, _ := newLatService(t)
+
+	// 非全域模式：快照為空
+	if got := svc.EgressSnapshot(); len(got) != 0 {
+		t.Errorf("非全域模式快照應為空, got %v", got)
+	}
+
+	// 開啟全域：u2(50ms) 最快 → 帳號走 u2
+	svc.SetLatencyRouting(true, 20*time.Millisecond)
+	conn, used, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil || used != "u2" {
+		t.Fatalf("Route = %s, %v", used, err)
+	}
+	conn.Close()
+	snap := svc.EgressSnapshot()
+	if snap["warp-aaaa"] != "u2" {
+		t.Errorf("快照應記錄實際出口 u2, got %v", snap)
+	}
+
+	// 關閉全域：快照清空
+	svc.SetLatencyRouting(false, 0)
+	if got := svc.EgressSnapshot(); len(got) != 0 {
+		t.Errorf("關閉後快照應清空, got %v", got)
+	}
+}
