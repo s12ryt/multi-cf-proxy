@@ -372,7 +372,15 @@ func (m *Manager) RecordProbe(id string, probeErr error, latency time.Duration) 
 	}
 	e.state.LastCheck = time.Now()
 	if probeErr == nil {
-		e.state.LastLatency = latency
+		// 平滑係數：單次尖峰（DNS 刷新輪/TLS 抖動）只移動 30%，抑制排序與漂移擺動；
+		// 丟棄判定仍用原始值，保持尖峰敏感。
+		const emaAlpha = 0.3
+		if e.state.LastLatency == 0 {
+			e.state.LastLatency = latency // 首次成功（或重建歸零後）：以原始值起步
+		} else {
+			e.state.LastLatency = time.Duration(
+				emaAlpha*float64(latency) + (1-emaAlpha)*float64(e.state.LastLatency))
+		}
 		if m.latencyMax > 0 && latency > m.latencyMax {
 			probeErr = fmt.Errorf("延遲 %s 超過丟棄閾值 %s", latency.Round(time.Millisecond), m.latencyMax.Round(time.Millisecond))
 		} else {

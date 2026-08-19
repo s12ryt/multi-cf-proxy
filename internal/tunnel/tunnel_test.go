@@ -182,12 +182,13 @@ func TestLatencyDiscardThreshold(t *testing.T) {
 		t.Errorf("延遲過高的上游不應留在健康池: %v", got)
 	}
 
-	// 後續低延遲探測可恢復使用。
+	// 後續低延遲探測可恢復使用；延遲為 EMA 平滑值（向 10ms 收斂：0.3*10+0.7*120=87ms）。
 	m.RecordProbe("u1", nil, 10*time.Millisecond)
 	st = m.States()["u1"]
-	if !st.Healthy || st.ConsecutiveFails != 0 || st.LastError != "" || st.LastLatency != 10*time.Millisecond {
+	if !st.Healthy || st.ConsecutiveFails != 0 || st.LastError != "" {
 		t.Errorf("低延遲恢復後狀態錯誤: %+v", st)
 	}
+	approxMS(t, st.LastLatency, 87*time.Millisecond)
 }
 
 func TestLatencyDiscardDisabled(t *testing.T) {
@@ -662,5 +663,60 @@ func TestProbeAllParallel(t *testing.T) {
 		if st := m.States()[id]; st.LastLatency != 250*time.Millisecond {
 			t.Errorf("隧道 %s 延遲未記錄: %+v", id, st)
 		}
+	}
+}
+
+// approxMS 允許 ±1ms 的浮點截斷誤差比較。
+func approxMS(t *testing.T, got, want time.Duration) {
+	t.Helper()
+	if d := got - want; d > time.Millisecond || d < -time.Millisecond {
+		t.Errorf("延遲 = %v, want ~%v (±1ms)", got, want)
+	}
+}
+
+// TestRecordProbeEMASmoothing 探測延遲以 EMA（α=0.3）平滑存儲：
+// 排序與漂移用的讀數不應被單次 DNS/TLS 抖動拉動，否則全域模式會假漂移擺動。
+func TestRecordProbeEMASmoothing(t *testing.T) {
+	var created []*fakeTunnel
+	m := NewManager(fakeFactory(&created), nil, 30*time.Second, 3)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 首次成功探測：原始值
+	m.RecordProbe("u1", nil, 100*time.Millisecond)
+	approxMS(t, m.States()["u1"].LastLatency, 100*time.Millisecond)
+
+	// 單次尖峰 300ms：EMA = 0.3*300 + 0.7*100 = 160ms（遠低於原始 300）
+	m.RecordProbe("u1", nil, 300*time.Millisecond)
+	approxMS(t, m.States()["u1"].LastLatency, 160*time.Millisecond)
+
+	// 回落 100ms：EMA = 0.3*100 + 0.7*160 = 142ms
+	m.RecordProbe("u1", nil, 100*time.Millisecond)
+	approxMS(t, m.States()["u1"].LastLatency, 142*time.Millisecond)
+
+	// 單次尖峰的移動量（100→160）遠小於原始尖峰（300），小於默認容差 20ms 場景下的擺動源
+	if d := m.States()["u1"].LastLatency - 100*time.Millisecond; d >= 60*time.Millisecond {
+		t.Errorf("EMA 對單次尖峰過於敏感: %v", d)
+	}
+}
+
+// TestRecordProbeDiscardUsesRawValue latency_discard 判定用原始值（非 EMA）：
+// 平滑不應稀釋尖峰的丟棄判定。
+func TestRecordProbeDiscardUsesRawValue(t *testing.T) {
+	var created []*fakeTunnel
+	m := NewManager(fakeFactory(&created), nil, 30*time.Second, 3)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+	m.SetLatencyMax(200 * time.Millisecond)
+
+	// 首次 100ms 正常
+	m.RecordProbe("u1", nil, 100*time.Millisecond)
+	// 原始 300ms 超過門檻 200ms → 應計為失敗（儘管 EMA 後僅 160ms）
+	m.RecordProbe("u1", nil, 300*time.Millisecond)
+	st := m.States()["u1"]
+	if st.ConsecutiveFails != 1 {
+		t.Errorf("丟棄判定應使用原始值: fails=%d, last_error=%q", st.ConsecutiveFails, st.LastError)
 	}
 }
