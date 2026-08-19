@@ -536,3 +536,32 @@ func TestEgressSnapshot(t *testing.T) {
 		t.Errorf("關閉後快照應清空, got %v", got)
 	}
 }
+
+// TestSetLatencyRoutingMarginKeepsSticky 僅調整容差不應清空黏住表
+// （避免改個 margin 引發全體帳號重新選路、出口 IP 齊跳）；模式開關切換才清空。
+func TestSetLatencyRoutingMarginKeepsSticky(t *testing.T) {
+	svc, _ := newLatService(t)
+	svc.SetLatencyRouting(true, 20*time.Millisecond)
+
+	conn, used, err := svc.Route(context.Background(), "warp-aaaa", "pw1", "tcp", "example.com:443")
+	if err != nil || used != "u2" {
+		t.Fatalf("初始路由應走最快 u2, got %s (%v)", used, err)
+	}
+	conn.Close()
+	if snap := svc.EgressSnapshot(); snap["warp-aaaa"] != "u2" {
+		t.Fatalf("黏住表應記錄 u2, got %v", snap)
+	}
+
+	// 僅改 margin：黏住保留
+	svc.SetLatencyRouting(true, 35*time.Millisecond)
+	if snap := svc.EgressSnapshot(); snap["warp-aaaa"] != "u2" {
+		t.Errorf("margin 單獨變動不應清黏住表, got %v", snap)
+	}
+
+	// 開關切換（開→關→開）：清空重新計算
+	svc.SetLatencyRouting(false, 35*time.Millisecond)
+	svc.SetLatencyRouting(true, 35*time.Millisecond)
+	if snap := svc.EgressSnapshot(); len(snap) != 0 {
+		t.Errorf("模式切換應清黏住表, got %v", snap)
+	}
+}

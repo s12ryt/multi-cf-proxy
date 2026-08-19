@@ -61,12 +61,16 @@ func NewService(a *auth.Store, r Registry, s *stats.Collector) *Service {
 }
 
 // SetLatencyRouting 熱套延遲優選設置（Web 設置保存即生效路徑）。
-// prefer=false 時回到「綁定優先」行為；模式切換會清空黏住表（重新計算目標）。
+// prefer=false 時回到「綁定優先」行為；僅模式開關切換會清空黏住表
+// （重新計算目標），單獨調整容差保留既有黏住（避免全體帳號出口齊跳）。
 func (s *Service) SetLatencyRouting(prefer bool, margin time.Duration) {
 	s.rmu.Lock()
+	toggled := s.prefer != prefer
 	s.prefer = prefer
 	s.margin = margin
-	s.sticky = map[string]string{}
+	if toggled {
+		s.sticky = map[string]string{}
+	}
 	s.rmu.Unlock()
 }
 
