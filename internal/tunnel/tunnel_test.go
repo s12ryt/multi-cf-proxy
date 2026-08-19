@@ -362,7 +362,8 @@ func TestLatencyProbeLoop(t *testing.T) {
 	}
 }
 
-// TestLatencyProbeDisabled 默認（未設定間隔）不啟動獨立循環。
+// TestLatencyProbeDisabled 默認（未設定間隔）不啟動獨立循環：
+// 啟動首輪探測（v1.6.9 起）應執行一次，但其後（interval=1h）不再有探測。
 func TestLatencyProbeDisabled(t *testing.T) {
 	var created []*fakeTunnel
 	var probes atomic.Int64
@@ -377,9 +378,19 @@ func TestLatencyProbeDisabled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go m.Run(ctx)
+
+	// 等待啟動首輪完成
+	deadline := time.Now().Add(time.Second)
+	for probes.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	base := probes.Load()
+	if base < 1 {
+		t.Fatal("啟動應立即執行首輪探測")
+	}
 	time.Sleep(200 * time.Millisecond)
-	if got := probes.Load(); got != 0 {
-		t.Fatalf("未設定間隔時不應有探測, probes=%d", got)
+	if got := probes.Load(); got != base {
+		t.Fatalf("interval=1h 下首輪後不應再探測, base=%d got=%d", base, got)
 	}
 }
 
@@ -514,18 +525,23 @@ func TestApplyHealthStartsLatencyLoop(t *testing.T) {
 	defer cancel()
 	go m.Run(ctx)
 
-	time.Sleep(100 * time.Millisecond)
-	if got := probes.Load(); got != 0 {
-		t.Fatalf("前置條件：不應有探測, got %d", got)
+	// 啟動首輪探測完成後取基線（v1.6.9 起啟動即探）
+	deadline := time.Now().Add(time.Second)
+	for probes.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	base := probes.Load()
+	if base < 1 {
+		t.Fatal("前置條件：啟動首輪應完成")
 	}
 	m.ApplyHealth(time.Hour, 3, 0, 30*time.Millisecond)
 
-	deadline := time.Now().Add(2 * time.Second)
-	for probes.Load() < 2 && time.Now().Before(deadline) {
+	deadline = time.Now().Add(2 * time.Second)
+	for probes.Load()-base < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := probes.Load(); got < 2 {
-		t.Fatalf("熱套 probeIvl=30ms 後應啟動獨立循環, probes=%d", got)
+	if got := probes.Load() - base; got < 2 {
+		t.Fatalf("熱套 probeIvl=30ms 後應啟動獨立循環, 新增=%d", got)
 	}
 }
 
@@ -718,5 +734,35 @@ func TestRecordProbeDiscardUsesRawValue(t *testing.T) {
 	st := m.States()["u1"]
 	if st.ConsecutiveFails != 1 {
 		t.Errorf("丟棄判定應使用原始值: fails=%d, last_error=%q", st.ConsecutiveFails, st.LastError)
+	}
+}
+
+// TestRunProbesImmediately Run 啟動應立即執行首輪探測（不等首個 ticker）：
+// 延遲優選與健康判定依賴探測數據；啟動後前 interval 秒不應退化為配置順序。
+func TestRunProbesImmediately(t *testing.T) {
+	var created []*fakeTunnel
+	var probes atomic.Int64
+	probe := func(ctx context.Context, d Dialer) (time.Duration, error) {
+		probes.Add(1)
+		return 30 * time.Millisecond, nil
+	}
+	m := NewManager(fakeFactory(&created), probe, 30*time.Second, 3)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for probes.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("啟動後 500ms 內應完成首輪探測（不應等待 30s ticker）")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st := m.States()["u1"]; st.LastLatency != 30*time.Millisecond {
+		t.Errorf("首輪探測應記錄延遲: %+v", st)
 	}
 }

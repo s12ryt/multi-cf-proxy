@@ -483,6 +483,10 @@ func (m *Manager) Run(ctx context.Context) {
 	defer stopLatency()
 	startLatency()
 
+	// 啟動立即首輪探測：不等首個 ticker——延遲優選/健康判定依賴探測數據，
+	// 否則啟動後前 interval 秒排序退化為配置順序。
+	m.probeAll(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
