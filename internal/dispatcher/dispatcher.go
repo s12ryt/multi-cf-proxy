@@ -28,12 +28,10 @@ type Registry interface {
 	Bound(upstreamID string) (tunnel.Tunnel, bool)
 	// Healthy 返回健康上游清單（按配置順序）。
 	Healthy() []tunnel.Tunnel
-	// HealthySortedByLatency 返回健康上游清單（按最近探測延遲升序，未知殿後）。
+	// HealthySortedByLatency 返回健康上游清單（按 EMA 平滑延遲升序，未知殿後）。
 	HealthySortedByLatency() []tunnel.Tunnel
 	// IsHealthy 查詢指定上游健康狀態。
 	IsHealthy(upstreamID string) bool
-	// LatencyOf 返回指定上游最近一次成功探測延遲；未知返回 false。
-	LatencyOf(upstreamID string) (time.Duration, bool)
 }
 
 // Service 鑑權選路服務。
@@ -44,9 +42,8 @@ type Service struct {
 	dialTimeout time.Duration
 
 	rmu    sync.Mutex
-	prefer bool          // 全域延遲優先模式
-	margin time.Duration // 切換容差（僅快超過此值才漂移；0 = 任何更快即切）
-	sticky map[string]string
+	prefer bool              // 全域延遲優先模式
+	sticky map[string]string // 帳號→實際出口（僅觀測用：UI 出口欄；不參與選路決策）
 }
 
 // NewService 建立服務；dialTimeout 為單次上游撥號超時（默認 15 秒）。
@@ -60,17 +57,12 @@ func NewService(a *auth.Store, r Registry, s *stats.Collector) *Service {
 	}
 }
 
-// SetLatencyRouting 熱套延遲優選設置（Web 設置保存即生效路徑）。
-// prefer=false 時回到「綁定優先」行為；僅模式開關切換會清空黏住表
-// （重新計算目標），單獨調整容差保留既有黏住（避免全體帳號出口齊跳）。
-func (s *Service) SetLatencyRouting(prefer bool, margin time.Duration) {
+// SetLatencyRouting 熱套延遲優先模式（Web 設置保存即生效路徑）。
+// prefer=false 時回到「綁定優先」行為；模式切換清空觀測用黏住表。
+func (s *Service) SetLatencyRouting(prefer bool) {
 	s.rmu.Lock()
-	toggled := s.prefer != prefer
 	s.prefer = prefer
-	s.margin = margin
-	if toggled {
-		s.sticky = map[string]string{}
-	}
+	s.sticky = map[string]string{}
 	s.rmu.Unlock()
 }
 
@@ -132,59 +124,24 @@ func (s *Service) EgressSnapshot() map[string]string {
 
 // candidates 生成嘗試順序：
 //   - 默認：綁定上游健康時優先；備援清單按最近探測延遲升序（快者先試）。
-//   - 全域延遲優先：忽略綁定，每帳號黏住當前出口；僅當其他上游快超過容差
-//     （margin=0 時任何更快）才漂移；黏住上游不健康時立即改選最快。
+//   - 全域延遲優先：取健康清單（按 EMA 平滑延遲升序、未知殿後），
+//     首位即目標（純最低，無容差閘門），其餘為撥號失敗時的降級序。
 func (s *Service) candidates(username, boundID string) []tunnel.Tunnel {
 	sorted := s.registry.HealthySortedByLatency()
 
 	s.rmu.Lock()
 	prefer := s.prefer
-	margin := s.margin
-	stickyID := s.sticky[username]
 	s.rmu.Unlock()
 
-	if !prefer {
-		var out []tunnel.Tunnel
-		seen := map[string]bool{}
-		if t, ok := s.registry.Bound(boundID); ok && s.registry.IsHealthy(boundID) {
-			out = append(out, t)
-			seen[boundID] = true
-		}
-		for _, t := range sorted {
-			if !seen[t.ID()] {
-				out = append(out, t)
-				seen[t.ID()] = true
-			}
-		}
-		return out
-	}
-
-	// 全域模式：決定本輪目標（黏住 → 容差漂移 → 失效取最快）
-	target := ""
-	if stickyID != "" && s.registry.IsHealthy(stickyID) {
-		if l, ok := s.registry.LatencyOf(stickyID); ok {
-			target = stickyID
-			if len(sorted) > 0 {
-				if fl, ok2 := s.registry.LatencyOf(sorted[0].ID()); ok2 && fl+margin < l {
-					target = sorted[0].ID() // 快超過容差 → 漂移
-				}
-			}
-		}
-	}
-	if target == "" && len(sorted) > 0 {
-		target = sorted[0].ID() // 初始（或黏住失效/延遲未知）＝當前最快
+	if prefer {
+		return sorted
 	}
 
 	var out []tunnel.Tunnel
 	seen := map[string]bool{}
-	if target != "" {
-		for _, t := range sorted {
-			if t.ID() == target {
-				out = append(out, t)
-				seen[target] = true
-				break
-			}
-		}
+	if t, ok := s.registry.Bound(boundID); ok && s.registry.IsHealthy(boundID) {
+		out = append(out, t)
+		seen[boundID] = true
 	}
 	for _, t := range sorted {
 		if !seen[t.ID()] {

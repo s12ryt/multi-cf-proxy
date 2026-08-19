@@ -2,7 +2,6 @@ package dispatcher
 
 import (
 	"errors"
-	"time"
 
 	"multi-cf-proxy/internal/tunnel"
 )
@@ -34,12 +33,4 @@ func (r *tunnelManagerRegistry) HealthySortedByLatency() []tunnel.Tunnel {
 func (r *tunnelManagerRegistry) IsHealthy(upstreamID string) bool {
 	st, ok := r.tm.States()[upstreamID]
 	return ok && st.Healthy && st.Running
-}
-
-func (r *tunnelManagerRegistry) LatencyOf(upstreamID string) (time.Duration, bool) {
-	st, ok := r.tm.States()[upstreamID]
-	if !ok || st.LastLatency == 0 {
-		return 0, false
-	}
-	return st.LastLatency, true
 }
