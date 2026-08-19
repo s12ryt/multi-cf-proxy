@@ -17,7 +17,7 @@ active health checks, automatic tunnel rebuilds, egress failover and traffic acc
 - **Multiple WARP instances**: userspace WireGuard (wireguard-go + gVisor netstack) — no TUN device, no root
 - **Dual-protocol inbound**: SOCKS5 (RFC 1928/1929, username/password auth only) and HTTP proxy (Basic + CONNECT) on separate ports
 - **Credential-bound egress**: every upstream gets an auto-generated random `username:password`; if the bound egress goes unhealthy, traffic fails over to other healthy egresses
-- **Latency-preferred routing**: failover candidates are ordered by probe latency (fastest first; latency is EMA-smoothed so a one-off DNS/TLS jitter cannot cause egress flapping); optional "global lowest-latency" mode — each account sticks to the fastest healthy egress and only drifts when another egress is faster by more than the switch margin
+- **Latency-preferred routing**: failover candidates are ordered by EMA-smoothed probe latency (fastest first); optional "global lowest-latency" mode — every account is routed to the currently lowest-latency healthy egress (dial failures fall through in latency order)
 - **Fully automatic reconnection**: periodic health probes (Cloudflare trace via tunnel) → consecutive failures reach threshold → marked unhealthy, tunnel auto-rebuilt → returns to the healthy pool once probes recover
 - **Traffic accounting**: per-account / per-upstream up/down bytes, IPv4 / IPv6 separated
 - **Web admin**: admin-password login (session), upstream CRUD, automatic WARP account registration, manual wgcf config import, credential regeneration, settings, stats
@@ -109,7 +109,7 @@ automatically fail over to another healthy egress.
   "listen_http": ":8080",
   "listen_web": ":8081",
   "dns_cache_seconds": 60,
-  "routing": { "prefer_lowest_latency": false, "switch_margin_ms": 20 },
+  "routing": { "prefer_lowest_latency": false },
   "health_check": { "interval_seconds": 30, "failure_threshold": 3, "latency_discard_seconds": 0, "latency_probe_seconds": 0 },
   "upstreams": [
     {

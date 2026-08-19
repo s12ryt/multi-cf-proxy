@@ -14,7 +14,7 @@
 - **多 WARP 實例**：用戶態 WireGuard（wireguard-go + gVisor netstack），無需 TUN 設備、無需 root
 - **雙協議入站**：SOCKS5（RFC 1928/1929，僅帳密認證）與 HTTP 代理（Basic + CONNECT），各一端口
 - **帳密綁出口**：每新增上游自動分配「隨機用戶名 + 隨機密碼」；綁定出口不健康時自動 failover 到其他健康出口
-- **延遲優選**：備援按探測延遲排序（快者先試；延遲經 EMA 平滑，單次 DNS/TLS 抖動不會引發出口擺動）；可選「全域延遲優先」模式——各帳號黏住最快健康出口，僅當其他上游快超過容差時才漂移
+- **延遲優選**：備援按探測延遲排序（快者先試；延遲經 EMA 平滑）；可選「全域延遲優先」模式——取健康上游清單、一律走當前延遲最低的健康出口（撥號失敗依延遲序降級）
 - **全自動重連**：週期健康探測（經隧道訪問 Cloudflare trace）→ 連續失敗達閾值 → 標記不健康並自動重建隧道 → 恢復後自動回到健康池
 - **流量統計**：每帳號 / 每上游的上下行位元組數，IPv4 / IPv6 分開
 - **Web 管理**：管理員密碼登入（session），上游增刪改、WARP 帳號自動註冊、手動導入 wgcf 配置、換帳密、設置、統計
@@ -101,7 +101,7 @@ curl -x http://warp-xxxx:PASSWORD@VPS:8080 https://www.cloudflare.com/cdn-cgi/tr
   "listen_http": ":8080",
   "listen_web": ":8081",
   "dns_cache_seconds": 60,
-  "routing": { "prefer_lowest_latency": false, "switch_margin_ms": 20 },
+  "routing": { "prefer_lowest_latency": false },
   "health_check": { "interval_seconds": 30, "failure_threshold": 3, "latency_discard_seconds": 0, "latency_probe_seconds": 0 },
   "upstreams": [
     {
