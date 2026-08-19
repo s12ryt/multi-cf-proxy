@@ -38,6 +38,7 @@ type State struct {
 	LastLatency      time.Duration `json:"last_latency_ms"`
 	LastError        string        `json:"last_error"`
 	Rebuilds         int64         `json:"rebuilds"`
+	Rebuilding       bool          `json:"rebuilding"`
 	Running          bool          `json:"running"`
 }
 
@@ -255,9 +256,6 @@ func (m *Manager) Get(id string) (Tunnel, bool) {
 // 停用/未運行的上游拒絕（避免喚醒 Manager 認為已停的隧道）；
 // 若自動重建正在進行，等待其完成後再執行（按鈕語意：必定執行一次）。
 func (m *Manager) Rebuild(ctx context.Context, id string) error {
-	// 等待在途重建釋放（自動重建路徑可能正持有旗標）
-	wait := time.NewTimer(0)
-	defer wait.Stop()
 	for {
 		m.mu.Lock()
 		e, ok := m.entries[id]
@@ -271,6 +269,7 @@ func (m *Manager) Rebuild(ctx context.Context, id string) error {
 		}
 		if !e.rebuilding {
 			e.rebuilding = true
+			e.state.Rebuilding = true
 			e.state.Rebuilds++
 			t := e.tunnel
 			m.mu.Unlock()
@@ -291,10 +290,12 @@ func (m *Manager) Rebuild(ctx context.Context, id string) error {
 }
 
 // doManualRebuild 執行底層重建並收尾狀態（呼叫方已持有 rebuilding 旗標）。
+// 重建成功後 LastLatency 歸零：新隧道延遲未知，排序殿後、待下次探測。
 func (m *Manager) doManualRebuild(ctx context.Context, e *tunnelEntry, t Tunnel) error {
 	defer func() {
 		m.mu.Lock()
 		e.rebuilding = false
+		e.state.Rebuilding = false
 		m.mu.Unlock()
 	}()
 	if err := t.Rebuild(ctx); err != nil {
@@ -304,6 +305,7 @@ func (m *Manager) doManualRebuild(ctx context.Context, e *tunnelEntry, t Tunnel)
 	e.state.Healthy = true
 	e.state.ConsecutiveFails = 0
 	e.state.LastError = ""
+	e.state.LastLatency = 0
 	m.mu.Unlock()
 	return nil
 }
@@ -390,6 +392,7 @@ func (m *Manager) RecordProbe(id string, probeErr error, latency time.Duration) 
 	var t Tunnel
 	if needRebuild {
 		e.rebuilding = true
+		e.state.Rebuilding = true
 		e.state.Rebuilds++
 		t = e.tunnel
 	}
@@ -400,11 +403,18 @@ func (m *Manager) RecordProbe(id string, probeErr error, latency time.Duration) 
 			defer func() {
 				m.mu.Lock()
 				e.rebuilding = false
+				e.state.Rebuilding = false
 				m.mu.Unlock()
 			}()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			_ = t.Rebuild(ctx)
+			if err := t.Rebuild(ctx); err == nil {
+				// 成功：新隧道延遲未知（排序殿後待重探），錯誤重置
+				m.mu.Lock()
+				e.state.LastLatency = 0
+				e.state.LastError = ""
+				m.mu.Unlock()
+			}
 		}()
 	}
 }

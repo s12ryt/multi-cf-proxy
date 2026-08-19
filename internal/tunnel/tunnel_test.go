@@ -527,3 +527,112 @@ func TestApplyHealthStartsLatencyLoop(t *testing.T) {
 		t.Fatalf("熱套 probeIvl=30ms 後應啟動獨立循環, probes=%d", got)
 	}
 }
+
+// blockTunnel 手動重建可阻塞的假隧道：用於觀測「重建中」窗口。
+type blockTunnel struct {
+	fakeTunnel
+	rebuildEnter chan struct{}
+	rebuildGate  chan struct{}
+}
+
+func (b *blockTunnel) Rebuild(ctx context.Context) error {
+	b.rebuild.Add(1)
+	if b.rebuildEnter != nil {
+		b.rebuildEnter <- struct{}{}
+		<-b.rebuildGate
+	}
+	return nil
+}
+
+// waitState 輪詢直到條件成立或超時。
+func waitState(t *testing.T, m *Manager, id string, ok func(State) bool) State {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		st := m.States()[id]
+		if ok(st) {
+			return st
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等待狀態超時: %+v", st)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestManualRebuildExposesFlagAndClearsLatency(t *testing.T) {
+	var created []*fakeTunnel
+	m := NewManager(fakeFactory(&created), nil, 30*time.Second, 3)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 先有成功探測，累積舊延遲
+	m.RecordProbe("u1", nil, 120*time.Millisecond)
+	if st := m.States()["u1"]; st.LastLatency != 120*time.Millisecond {
+		t.Fatalf("前置: LastLatency = %v", st.LastLatency)
+	}
+
+	// 換成可阻塞版本：直接改 entries 內隧道（避開 factory）不可行，改用 Manager.Rebuild 於背景跑
+	bt := &blockTunnel{
+		rebuildEnter: make(chan struct{}, 1),
+		rebuildGate:  make(chan struct{}),
+	}
+	bt.id = "u1"
+	bt.fp.Store(created[0].fp.Load())
+	// 替換 entries 中的隧道（測試專用；經 States 觀測的行為不變）
+	m.mu.Lock()
+	m.entries["u1"].tunnel = bt
+	m.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() { done <- m.Rebuild(context.Background(), "u1") }()
+
+	<-bt.rebuildEnter // 重建已進入
+	st := waitState(t, m, "u1", func(s State) bool { return s.Rebuilding })
+	if !st.Rebuilding {
+		t.Fatal("重建期間 State.Rebuilding 應為 true")
+	}
+	close(bt.rebuildGate) // 放行
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	st = waitState(t, m, "u1", func(s State) bool { return !s.Rebuilding })
+	if st.Rebuilding {
+		t.Fatal("重建結束後 State.Rebuilding 應為 false")
+	}
+	if st.LastLatency != 0 {
+		t.Errorf("重建成功後 LastLatency 應歸零（延遲未知待重探）, got %v", st.LastLatency)
+	}
+}
+
+func TestAutoRebuildFlagLifecycle(t *testing.T) {
+	var created []*fakeTunnel
+	probeCalls := func(ctx context.Context, d Dialer) (time.Duration, error) {
+		return 0, errProbeFail
+	}
+	m := NewManager(fakeFactory(&created), probeCalls, 30*time.Second, 2)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+	// 先累積成功延遲
+	m.RecordProbe("u1", nil, 90*time.Millisecond)
+
+	m.RecordProbe("u1", errProbeFail, 0)
+	m.RecordProbe("u1", errProbeFail, 0) // 達閾值 → 不健康 + 自動重建
+
+	st := waitState(t, m, "u1", func(s State) bool { return s.Rebuilds >= 1 })
+	if st.Rebuilds < 1 {
+		t.Fatalf("應已觸發自動重建: %+v", st)
+	}
+	// 自動重建為背景 goroutine；結束後旗標清除、延遲歸零
+	st = waitState(t, m, "u1", func(s State) bool { return !s.Rebuilding })
+	if st.Rebuilding {
+		t.Fatal("自動重建結束後 Rebuilding 應為 false")
+	}
+	if st.LastLatency != 0 {
+		t.Errorf("自動重建後 LastLatency 應歸零, got %v", st.LastLatency)
+	}
+}
+
+var errProbeFail = errors.New("probe fail")
