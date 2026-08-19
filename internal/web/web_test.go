@@ -629,7 +629,7 @@ func TestSettingsRoutingAndApplier(t *testing.T) {
 
 	// routing 設置保存 + applier 觸發
 	body := map[string]any{
-		"routing": map[string]any{"prefer_lowest_latency": true, "switch_margin_ms": 35},
+		"routing": map[string]any{"prefer_lowest_latency": true},
 	}
 	resp, jbody := e.do(t, "PUT", "/api/settings", body, &ck)
 	if resp.StatusCode != 200 {
@@ -638,7 +638,7 @@ func TestSettingsRoutingAndApplier(t *testing.T) {
 	if appliedCount.Load() != 1 {
 		t.Errorf("applier 應被調用一次, got %d", appliedCount.Load())
 	}
-	if appliedCfg == nil || !appliedCfg.Routing.PreferLowestLatency || appliedCfg.Routing.SwitchMarginMS != 35 {
+	if appliedCfg == nil || !appliedCfg.Routing.PreferLowestLatency {
 		t.Errorf("applier 應收到保存後的新配置: %+v", appliedCfg)
 	}
 	if note, _ := jbody["note"].(string); strings.Contains(note, "重啟") {
@@ -647,20 +647,6 @@ func TestSettingsRoutingAndApplier(t *testing.T) {
 	applied, _ := jbody["applied"].([]any)
 	if len(applied) != 1 {
 		t.Errorf("回應 applied 應包含套用報告, got %#v", jbody["applied"])
-	}
-
-	// 部分更新：只改 margin（顯式 0 停用防抖），prefer 保持
-	if resp, _ = e.do(t, "PUT", "/api/settings", map[string]any{"routing": map[string]any{"switch_margin_ms": 0}}, &ck); resp.StatusCode != 200 {
-		t.Fatalf("部分 routing 更新應 200, got %d", resp.StatusCode)
-	}
-	got := e.cfg.Get().Routing
-	if !got.PreferLowestLatency || got.SwitchMarginMS != 0 {
-		t.Errorf("部分更新語意錯誤: %+v", got)
-	}
-
-	// 負容差拒絕
-	if resp, _ = e.do(t, "PUT", "/api/settings", map[string]any{"routing": map[string]any{"switch_margin_ms": -5}}, &ck); resp.StatusCode != 400 {
-		t.Errorf("負容差應 400, got %d", resp.StatusCode)
 	}
 
 	// overview 暴露 routing
@@ -673,8 +659,8 @@ func TestSettingsRoutingAndApplier(t *testing.T) {
 	if v, _ := rt["prefer_lowest_latency"].(bool); !v {
 		t.Errorf("overview routing.prefer_lowest_latency = %#v, want true", rt["prefer_lowest_latency"])
 	}
-	if v, _ := rt["switch_margin_ms"].(float64); v != 0 {
-		t.Errorf("overview routing.switch_margin_ms = %#v, want 0", rt["switch_margin_ms"])
+	if _, has := rt["switch_margin_ms"]; has {
+		t.Error("overview 不應再暴露已移除的 switch_margin_ms")
 	}
 }
 
