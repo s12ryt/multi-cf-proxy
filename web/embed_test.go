@@ -50,6 +50,12 @@ func TestIndexHTMLContract(t *testing.T) {
 		{"DNS 快取設置輸入", "setDNSCache"},
 		{"延遲探測間隔設置鍵", "latency_probe_seconds"},
 		{"延遲探測間隔設置輸入", "setProbe"},
+		// v1.6.5：延遲優選 + 全設置熱重載
+		{"全域延遲優先設置鍵", "prefer_lowest_latency"},
+		{"全域延遲優先開關輸入", "setPrefer"},
+		{"切換容差設置鍵", "switch_margin_ms"},
+		{"切換容差輸入", "setMargin"},
+		{"套用報告展示鍵", "applied"},
 	}
 	for _, m := range mustContain {
 		if !strings.Contains(html, m.substr) {

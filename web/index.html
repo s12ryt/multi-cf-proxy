@@ -45,6 +45,9 @@
   .card h2{font-size:14px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:8px;color:var(--tx)}
   .card h2 svg{color:var(--ok)}
   .hint{font-size:12px;color:var(--faint);margin-top:10px}
+  .chk{display:flex;flex-direction:column;gap:6px;justify-content:flex-end}
+  .chk label{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--fg)}
+  .hint-inline{font-size:11px;color:var(--faint)}
 
   .tbl-wrap{overflow-x:auto;border-radius:8px}
   table{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
@@ -543,8 +546,12 @@ function openSettings() {
       <div><label for="setProbe">延遲探測間隔（秒，0=隨健康檢查）</label><input type="number" id="setProbe" min="0" value="${s.health?.latency_probe_seconds ?? 0}"></div>
       <div><label for="setDNSCache">DNS 快取（秒，0=停用）</label><input type="number" id="setDNSCache" min="0" value="${s.dns_cache_seconds ?? 60}"></div>
     </div>
+    <div class="row">
+      <div class="chk"><label for="setPrefer"><input type="checkbox" id="setPrefer" ${s.routing?.prefer_lowest_latency ? 'checked' : ''}> 全域延遲優先</label><span class="hint-inline">忽略帳密綁定，各帳號走最快健康出口</span></div>
+      <div><label for="setMargin">切換容差（ms，0=不防抖）</label><input type="number" id="setMargin" min="0" value="${s.routing?.switch_margin_ms ?? 20}"></div>
+    </div>
     <div style="margin-top:14px"><button class="ghost" id="btn-set" onclick="saveSettings()">保存設置</button></div>
-    <p class="hint">端口與健康參數保存後需重啟服務生效；延遲連續超標會視為探測失敗並重建；域名 DNS 結果經 WARP 解析後於本機快取指定秒數（0=每次都解析）。</p>
+    <p class="hint">全部設置保存後即時生效（含端口與健康參數）；若變更了 Web 監聽地址，請以新地址重新開啟管理頁。延遲連續超標會視為探測失敗並重建；域名 DNS 結果經 WARP 解析後於本機快取指定秒數（0=每次都解析）；開啟全域延遲優先後各帳號黏住最快出口，僅當其他上游快超過容差時才漂移。</p>
     <hr style="border:none;border-top:1px solid var(--line);margin:18px 0 6px">
     <label for="newPw">修改管理員密碼（新密碼 ≥8 位）</label>
     <div class="row">
@@ -578,7 +585,7 @@ async function importConf() {
 async function saveSettings() {
   const b = $('btn-set'); btnBusy(b, true);
   try {
-    await api('PUT', '/api/settings', {
+    const r = await api('PUT', '/api/settings', {
       listen_socks5: $('setSocks').value, listen_http: $('setHttp').value, listen_web: $('setWeb').value,
       dns_cache_seconds: parseInt($('setDNSCache').value || '60'),
       health: {
@@ -587,9 +594,14 @@ async function saveSettings() {
         latency_discard_seconds: parseFloat($('setLatency').value || '0'),
         latency_probe_seconds: parseInt($('setProbe').value || '0'),
       },
+      routing: {
+        prefer_lowest_latency: $('setPrefer').checked,
+        switch_margin_ms: parseInt($('setMargin').value || '20'),
+      },
     });
-    toast(true, '已保存（重啟後生效）');
+    toast(true, (r.applied && r.applied.length) ? r.applied.join('；') : '設置已保存並即時生效');
     closeModal();
+    refresh();
   } catch (e) { toast(false, e.message); }
   btnBusy(b, false);
 }
