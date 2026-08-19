@@ -43,9 +43,6 @@ func (r *echoRegistry) IsHealthy(id string) bool              { return true }
 func (r *echoRegistry) HealthySortedByLatency() []tunnel.Tunnel {
 	return []tunnel.Tunnel{r.t}
 }
-func (r *echoRegistry) LatencyOf(id string) (time.Duration, bool) {
-	return 10 * time.Millisecond, true
-}
 
 // startEcho 啟動 echo server，返回地址。
 func startEcho(t *testing.T) string {

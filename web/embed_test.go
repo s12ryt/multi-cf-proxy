@@ -53,8 +53,6 @@ func TestIndexHTMLContract(t *testing.T) {
 		// v1.6.5：延遲優選 + 全設置熱重載
 		{"全域延遲優先設置鍵", "prefer_lowest_latency"},
 		{"全域延遲優先開關輸入", "setPrefer"},
-		{"切換容差設置鍵", "switch_margin_ms"},
-		{"切換容差輸入", "setMargin"},
 		{"套用報告展示鍵", "applied"},
 		// v1.6.6：重建反饋 + 實際出口可觀測
 		{"重建中徽章資料鍵", "rebuilding"},
@@ -77,6 +75,9 @@ func TestIndexHTMLContract(t *testing.T) {
 		{"原生 confirm（阻塞且樣式突兀）", "confirm("},
 		{"外鏈字體（離線/VPS 環境不可達）", "fonts.googleapis"},
 		{"外鏈 CDN 腳本（單檔自足原則）", "https://cdn"},
+		// v1.6.9：switch_margin_ms 已移除（純最低語意），UI 不得殘留
+		{"已移除的切換容差鍵", "switch_margin_ms"},
+		{"已移除的切換容差輸入", "setMargin"},
 	}
 	for _, m := range mustNotContain {
 		if strings.Contains(html, m.substr) {
