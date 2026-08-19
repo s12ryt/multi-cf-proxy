@@ -223,60 +223,21 @@ func TestUpstreamByID(t *testing.T) {
 	}
 }
 
-func TestRoutingDefaults(t *testing.T) {
-	c := Default()
-	if c.Routing.SwitchMarginMS != 20 {
-		t.Errorf("默認 switch_margin_ms = %d, want 20", c.Routing.SwitchMarginMS)
-	}
-	if c.Routing.PreferLowestLatency {
-		t.Error("默認 prefer_lowest_latency 應為 false")
-	}
-}
-
-func TestLoadRoutingMissingKeyFillsMargin(t *testing.T) {
+// TestLoadLegacyMarginKeyIgnored v1.6.9 移除 switch_margin_ms：存量配置含此鍵不加載不報錯（未知鍵靜默忽略）。
+func TestLoadLegacyMarginKeyIgnored(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	// 存量配置：無 routing 區塊 → margin 補默認 20
-	if err := os.WriteFile(path, []byte(`{"listen_socks5":":1080","listen_http":":8080","listen_web":":8081"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	c, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if c.Routing.SwitchMarginMS != 20 {
-		t.Errorf("缺 routing 鍵時 switch_margin_ms 應補 20, got %d", c.Routing.SwitchMarginMS)
-	}
-	if c.Routing.PreferLowestLatency {
-		t.Error("缺 routing 鍵時 prefer_lowest_latency 應為 false")
-	}
-}
-
-func TestLoadRoutingExplicitValues(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	raw := `{"routing":{"prefer_lowest_latency":true,"switch_margin_ms":0}}`
+	raw := `{"routing":{"prefer_lowest_latency":true,"switch_margin_ms":20}}`
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	c, err := Load(path)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("存量配置含已移除鍵應可加載: %v", err)
 	}
 	if !c.Routing.PreferLowestLatency {
-		t.Error("顯式 prefer_lowest_latency=true 應保留")
+		t.Error("prefer_lowest_latency 應保留")
 	}
-	if c.Routing.SwitchMarginMS != 0 {
-		t.Errorf("顯式 switch_margin_ms=0（停用防抖）應保留, got %d", c.Routing.SwitchMarginMS)
-	}
-}
-
-func TestValidateRoutingNegativeMargin(t *testing.T) {
-	c := Default()
-	c.Routing.SwitchMarginMS = -1
-	if err := c.Validate(); err == nil {
-		t.Error("routing.switch_margin_ms 為負應驗證失敗")
-	}
-	c.Routing.SwitchMarginMS = 0
 	if err := c.Validate(); err != nil {
-		t.Errorf("switch_margin_ms=0 應合法: %v", err)
+		t.Errorf("Validate 應通過: %v", err)
 	}
 }
