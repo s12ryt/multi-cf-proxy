@@ -56,6 +56,13 @@ func TestIndexHTMLContract(t *testing.T) {
 		{"切換容差設置鍵", "switch_margin_ms"},
 		{"切換容差輸入", "setMargin"},
 		{"套用報告展示鍵", "applied"},
+		// v1.6.6：重建反饋 + 實際出口可觀測
+		{"重建中徽章資料鍵", "rebuilding"},
+		{"重建按鈕 loading 防抖", "manualRebuild"},
+		{"自動重建提示", "自動重建完成"},
+		{"帳號實際出口鍵", "egress"},
+		{"出口漂移標記", "漂移"},
+		{"重建完成行閃爍", "flash-row"},
 	}
 	for _, m := range mustContain {
 		if !strings.Contains(html, m.substr) {

@@ -66,6 +66,10 @@
   .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px}
   .b-ok{background:var(--ok-dim);color:var(--ok)} .b-bad{background:var(--bad-dim);color:var(--bad)}
   .b-off{background:rgba(100,116,139,.18);color:var(--dim)}
+  .b-rebuild{background:rgba(59,130,246,.15);color:#7dd3fc;animation:pulse 1.2s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  .flash-row td{animation:rowflash 1.6s ease-out}
+  @keyframes rowflash{0%,60%{background:rgba(59,130,246,.14)}100%{background:transparent}}
 
   button{background:var(--cta);color:#04150a;border:none;border-radius:9px;padding:8px 15px;
     font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;
@@ -372,6 +376,9 @@ $('pw').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
 
 /* ---------- 渲染（JSON diff：資料不變不重繪，避免閃爍/打斷選取） ---------- */
 let overview = null, lastJSON = '';
+let prevRebuilds = {};        // 上一輪各上游 rebuilds 計數（偵測自動重建）
+let manualRebuild = new Set(); // 手動觸發中的上游（其計數增加不另 toast）
+let flashPending = new Set();  // 渲染後需閃爍的行
 async function refresh() {
   let data, statsData;
   try {
@@ -384,6 +391,18 @@ async function refresh() {
   if (j === lastJSON) return;
   lastJSON = j;
   overview = data;
+
+  /* 偵測重建計數增加：非手動路徑 → 自動重建提示 */
+  const ups0 = data.upstreams || [];
+  for (const u of ups0) {
+    const prev = prevRebuilds[u.id];
+    if (prev !== undefined && u.rebuilds > prev) {
+      flashPending.add(u.id);
+      if (!manualRebuild.has(u.id)) toast(true, `上游 ${u.name} 自動重建完成（探測失敗達閾值）`);
+    }
+  }
+  for (const id of [...manualRebuild]) if (!ups0.some(u => u.id === id)) manualRebuild.delete(id);
+  prevRebuilds = Object.fromEntries(ups0.map(u => [u.id, u.rebuilds]));
 
   const s = data.settings;
   $('ports').textContent = `SOCKS5 ${s.listen_socks5} · HTTP ${s.listen_http} · Web ${s.listen_web}`;
@@ -414,15 +433,18 @@ async function refresh() {
     const st = u.stats || {};
     const status = !u.enabled
       ? '<span class="badge b-off">停用</span>'
-      : u.healthy
-        ? `<span class="dot ok"></span><span class="badge b-ok">健康</span>`
-        : `<span class="dot bad"></span><span class="badge b-bad" title="${esc(u.last_error || '探測失敗')}">不健康</span>`;
+      : u.rebuilding
+        ? '<span class="dot"></span><span class="badge b-rebuild">重建中</span>'
+        : u.healthy
+          ? `<span class="dot ok"></span><span class="badge b-ok">健康</span>`
+          : `<span class="dot bad"></span><span class="badge b-bad" title="${esc(u.last_error || '探測失敗')}">不健康</span>`;
     const latency = Number(u.last_latency_ms || 0);
     const latencyColor = latency <= 300 ? 'var(--ok)' : latency <= 800 ? 'var(--warn)' : 'var(--bad)';
     const latencyCell = u.enabled && latency > 0
       ? `<span class="mono" style="color:${latencyColor}">${latency} ms</span>`
       : '<span style="color:var(--faint)">—</span>';
     const tr = document.createElement('tr');
+    if (flashPending.has(u.id)) { tr.classList.add('flash-row'); flashPending.delete(u.id); }
     tr.innerHTML = `
       <td class="mono">${esc(u.name)}</td>
       <td>${status}</td>
@@ -437,13 +459,13 @@ async function refresh() {
       <td class="mono" style="white-space:normal">${fmt((st.up_bytes||0)+(st.ipv6_up_bytes||0))} / ${fmt((st.down_bytes||0)+(st.ipv6_down_bytes||0))}</td>
       <td class="actions">
         <button class="ghost" data-act="toggle">${u.enabled ? '停用' : '啟用'}</button>
-        <button class="ghost" data-act="rebuild">重建</button>
+        <button class="ghost" data-act="rebuild" ${u.rebuilding ? 'disabled title="重建進行中"' : ''}>重建</button>
         <button class="ghost" data-act="regen">換帳密</button>
         <button class="danger" data-act="del">刪除</button>
       </td>`;
     const bind = (act, fn) => tr.querySelector(`[data-act="${act}"]`).addEventListener('click', () => fn(u));
     bind('toggle', u => apiCall('PATCH', '/api/upstreams/' + u.id, { enabled: !u.enabled }, '已' + (u.enabled ? '停用' : '啟用')));
-    bind('rebuild', u => apiCall('POST', `/api/upstreams/${u.id}/rebuild`, undefined, '已觸發重建'));
+    bind('rebuild', u => rebuildUpstream(u, tr.querySelector('[data-act="rebuild"]')));
     bind('regen', u => confirmBox('重新生成帳密', `上游 ${u.name} 的舊帳密將立即失效，確定？`, () =>
       apiCall('POST', `/api/upstreams/${u.id}/credentials`, undefined, '已生成新帳密', r => showCredentials([r], '新帳密'))));
     bind('del', u => confirmBox('刪除上游', `確定刪除 ${u.name} 及其帳密？此操作不可復原。`, () =>
@@ -462,14 +484,34 @@ async function refresh() {
     const st = a.stats || {};
     const bars = Math.min(8, st.connections || 0);
     const heat = `<span class="conn-heatmap">${Array.from({length: 8}, (_, i) => `<i class="${i < bars ? 'on' : ''}"></i>`).join('')}</span>`;
+    const drifted = a.egress && a.upstream && a.egress !== a.upstream;
+    const egName = drifted || a.egress
+      ? (ups.find(x => x.id === a.egress)?.name || a.egress)
+      : (ups.find(x => x.id === a.upstream)?.name || a.upstream || '—');
+    const egCell = `${esc(egName)}${drifted ? ' <span class="badge b-rebuild" style="animation:none" title="全域延遲優先：實際出口與綁定上游不同">漂移</span>' : ''}`;
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="mono">${esc(a.username)}</td><td class="mono">${esc(a.upstream)}</td>
+      <td class="mono">${esc(a.username)}</td><td class="mono" title="綁定：${esc(ups.find(x => x.id === a.upstream)?.name || a.upstream || '—')}">${egCell}</td>
       <td class="num">${st.connections ?? 0}${heat}</td><td class="num">${st.total_conns ?? 0}</td>
       <td class="mono">${fmt(st.up_bytes)}</td><td class="mono">${fmt(st.down_bytes)}</td>
       <td>${ago(st.last_active)}</td>`;
     at.appendChild(tr);
   }
+}
+
+/* 手動重建：按鈕 loading + 完成提示計數（先登記避免輪詢誤判為自動重建；
+   完成後先讓 refresh 消化計數變化，再移除登記，避免顯式刷新誤報 toast） */
+async function rebuildUpstream(u, btn) {
+  if (btn.disabled) return;
+  manualRebuild.add(u.id);
+  btnBusy(btn, true);
+  try {
+    const r = await api('POST', `/api/upstreams/${u.id}/rebuild`);
+    toast(true, `${u.name} 重建完成（累計 ${r.rebuilds ?? '?'} 次）`);
+    await refresh();
+  } catch (e) { toast(false, e.message); }
+  manualRebuild.delete(u.id);
+  btnBusy(btn, false);
 }
 
 /* 統一 API 動作封裝：loading → 結果反饋 → 自動刷新 */
