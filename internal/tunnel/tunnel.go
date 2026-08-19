@@ -60,10 +60,15 @@ type Factory func(u *config.Upstream) (Tunnel, error)
 // ProbeFunc 健康探測函數：返回延遲或錯誤。
 type ProbeFunc func(ctx context.Context, d Dialer) (time.Duration, error)
 
+// probeURL 健康探測目標：Cloudflare 官方 1.1.1.1 的 trace 端點（TLS 證書有效）。
+// 採 IP 直連——避免域名解析經隧道 DNS 污染延遲量測（快取 TTL 與探測間隔
+// 不同步時每隔數輪多付一次 DNS 往返），量得純路徑延遲（TCP+TLS+HTTP）。
+const probeURL = "https://1.1.1.1/cdn-cgi/trace"
+
 // DefaultProbe 經隧道訪問 Cloudflare trace 端點驗證连通性。
 func DefaultProbe(ctx context.Context, d Dialer) (time.Duration, error) {
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://www.cloudflare.com/cdn-cgi/trace", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 	if err != nil {
 		return 0, err
 	}

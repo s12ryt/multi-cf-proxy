@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -764,5 +765,21 @@ func TestRunProbesImmediately(t *testing.T) {
 	}
 	if st := m.States()["u1"]; st.LastLatency != 30*time.Millisecond {
 		t.Errorf("首輪探測應記錄延遲: %+v", st)
+	}
+}
+
+// TestProbeTargetIsIPLiteral 探測目標必須是 IP 直連：域名目標會在每輪探測
+// 經隧道 DNS（快取 TTL 60s vs 探測間隔更短 → 交替多付 DNS 往返），污染
+// 延遲量測並在排序中引入系統性抖動。IP 直連量測純路徑延遲（TCP+TLS+HTTP）。
+func TestProbeTargetIsIPLiteral(t *testing.T) {
+	u, err := url.Parse(probeURL)
+	if err != nil {
+		t.Fatalf("probeURL 無法解析: %v", err)
+	}
+	if net.ParseIP(u.Hostname()) == nil {
+		t.Errorf("探測目標應為 IP 字面值（免隧道 DNS）, got %q", u.Hostname())
+	}
+	if !strings.HasSuffix(u.Path, "/cdn-cgi/trace") {
+		t.Errorf("探測路徑應為 Cloudflare trace 端點, got %q", u.Path)
 	}
 }
