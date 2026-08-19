@@ -160,3 +160,42 @@ func TestSwapClosesOldQuietly(t *testing.T) {
 		t.Error("Swap 後新端口應可連通")
 	}
 }
+
+// TestCommitSwapConflictClosesOrphan Swap 第二階段複查：
+// 鎖外綁定期間 entry 已被併發替換 → 放棄本次切換、關閉孤兒 listener、不覆蓋登記。
+func TestCommitSwapConflictClosesOrphan(t *testing.T) {
+	s := New()
+	port := freePort(t)
+	addr := net.JoinHostPort("127.0.0.1", itoa(port))
+	if err := s.Start("t", addr, echoServe); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// 模擬「本 Swap 在鎖外綁定期間，另一個 Swap 已先行完成」：
+	// 直接改 entry.addr 表示登記已被換走。
+	rivalPort := freePort(t)
+	rivalAddr := net.JoinHostPort("127.0.0.1", itoa(rivalPort))
+	s.mu.Lock()
+	s.entries["t"].addr = rivalAddr
+	s.mu.Unlock()
+
+	// 本 Swap 綁好自己的新 listener 後進入提交階段
+	orphanPort := freePort(t)
+	orphanAddr := net.JoinHostPort("127.0.0.1", itoa(orphanPort))
+	ln, err := net.Listen("tcp", orphanAddr)
+	if err != nil {
+		t.Fatalf("綁孤兒 listener 失敗: %v", err)
+	}
+	if err := s.commitSwap("t", addr, orphanAddr, ln); err == nil {
+		t.Fatal("併發衝突的 commitSwap 應返回錯誤")
+	}
+	if canDial(t, orphanPort) {
+		t.Error("衝突分支的孤兒 listener 應已被關閉（不留佔用端口）")
+	}
+	s.mu.Lock()
+	got := s.entries["t"].addr
+	s.mu.Unlock()
+	if got != rivalAddr {
+		t.Errorf("衝突分支不得覆蓋他人登記: got %q, want %q", got, rivalAddr)
+	}
+}

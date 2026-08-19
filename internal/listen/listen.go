@@ -56,7 +56,6 @@ func (s *Server) Swap(name, newAddr string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("未知服務 %s", name)
 	}
-	serve := e.serve
 	oldAddr := e.addr
 	if oldAddr == newAddr {
 		s.mu.Unlock()
@@ -69,8 +68,25 @@ func (s *Server) Swap(name, newAddr string) error {
 	if err != nil {
 		return fmt.Errorf("綁定 %s（%s）失敗（沿用舊地址 %s）: %w", name, newAddr, oldAddr, err)
 	}
+	return s.commitSwap(name, oldAddr, newAddr, ln)
+}
 
+// commitSwap Swap 的提交階段：鎖內複查登記地址仍為出發時所見（防併發雙換）。
+// 衝突時關閉自己綁的 listener（不留孤兒端口/洩漏 serveLoop）並返回錯誤。
+func (s *Server) commitSwap(name, expectAddr, newAddr string, ln net.Listener) error {
 	s.mu.Lock()
+	e, ok := s.entries[name]
+	if !ok {
+		s.mu.Unlock()
+		_ = ln.Close()
+		return fmt.Errorf("服務 %s 已被移除，放棄本次切換到 %s", name, newAddr)
+	}
+	if e.addr != expectAddr {
+		s.mu.Unlock()
+		_ = ln.Close()
+		return fmt.Errorf("服務 %s 已被併發替換（%s → %s），放棄本次切換到 %s", name, expectAddr, e.addr, newAddr)
+	}
+	serve := e.serve
 	old := e.ln
 	e.addr = newAddr
 	e.ln = ln
