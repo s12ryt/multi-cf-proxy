@@ -98,6 +98,7 @@ func main() {
 	}
 
 	webSrv := web.New(cfg, tm, authStore, collector, warp.NewClient().Register)
+	webSrv.SetEgressSource(svc.EgressSnapshot)
 	if err := ls.Start("Web", c.ListenWeb, func(ln net.Listener) error {
 		return http.Serve(ln, webSrv.Handler())
 	}); err != nil {

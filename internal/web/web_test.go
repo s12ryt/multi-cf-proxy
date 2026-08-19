@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -674,5 +675,86 @@ func TestSettingsRoutingAndApplier(t *testing.T) {
 	}
 	if v, _ := rt["switch_margin_ms"].(float64); v != 0 {
 		t.Errorf("overview routing.switch_margin_ms = %#v, want 0", rt["switch_margin_ms"])
+	}
+}
+
+func TestRebuildResponseAndEgress(t *testing.T) {
+	e := newTestEnv(t)
+	ck := e.login(t)
+
+	// 導入一個上游供重建
+	resp, body := e.do(t, "POST", "/api/upstreams/import", map[string]string{"conf": validConfText, "name": "warp-t"}, &ck)
+	if resp.StatusCode != 200 {
+		t.Fatalf("導入應 200, got %d", resp.StatusCode)
+	}
+	id, _ := body["id"].(string)
+
+	// 重建回應含 rebuilds 計數
+	resp, body = e.do(t, "POST", "/api/upstreams/"+id+"/rebuild", nil, &ck)
+	if resp.StatusCode != 200 {
+		t.Fatalf("重建應 200, got %d", resp.StatusCode)
+	}
+	if n, ok := body["rebuilds"].(float64); !ok || n < 1 {
+		t.Errorf("重建回應應含 rebuilds>=1, got %#v", body["rebuilds"])
+	}
+
+	// overview：無 egress 來源時帳號 egress 回退綁定值
+	resp, body = e.do(t, "GET", "/api/overview", nil, &ck)
+	if resp.StatusCode != 200 {
+		t.Fatalf("overview 應 200")
+	}
+	accts, _ := body["accounts"].([]any)
+	if len(accts) == 0 {
+		t.Fatal("應至少一個帳號")
+	}
+	a0, _ := accts[0].(map[string]any)
+	eg, _ := a0["egress"].(string)
+	if eg == "" {
+		t.Errorf("egress 應回退綁定上游 ID, got %#v", a0["egress"])
+	}
+
+	// 注入 egress 來源：顯示實際出口
+	bound := eg
+	e.webSrv.SetEgressSource(func() map[string]string {
+		user, _ := a0["username"].(string)
+		return map[string]string{user: "u-other"}
+	})
+	resp, body = e.do(t, "GET", "/api/overview", nil, &ck)
+	accts, _ = body["accounts"].([]any)
+	a0, _ = accts[0].(map[string]any)
+	if eg, _ = a0["egress"].(string); eg != "u-other" || eg == bound {
+		t.Errorf("egress 應為來源提供的實際出口 u-other, got %q", eg)
+	}
+
+	// State 快照暴露 rebuilding（重建完成後應為 false）
+	ups, _ := body["upstreams"].([]any)
+	u0, _ := ups[0].(map[string]any)
+	if v, _ := u0["rebuilding"].(bool); v {
+		t.Error("非重建期間 rebuilding 應為 false")
+	}
+}
+
+// TestRebuildSurvivesClientDisconnect 手動重建不得因客戶端斷線而中止：
+// handleRebuild 必須以獨立背景 ctx 執行（源碼契約：不得引用 r.Context()）。
+// WireGuard 重建含握手可能達秒級；若綁架於請求 ctx，代理/瀏覽器逾時即中斷重建。
+func TestRebuildSurvivesClientDisconnect(t *testing.T) {
+	src, err := os.ReadFile("web.go")
+	if err != nil {
+		t.Fatalf("讀取 web.go 失敗: %v", err)
+	}
+	text := string(src)
+	start := strings.Index(text, "func (s *Server) handleRebuild")
+	if start < 0 {
+		t.Fatal("找不到 handleRebuild")
+	}
+	body := text[start:]
+	if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
+		body = body[:end+1]
+	}
+	if strings.Contains(body, "r.Context()") {
+		t.Error("handleRebuild 不得使用 r.Context()（客戶端斷線會中止進行中的重建）；請改用帶逾時的背景 ctx")
+	}
+	if !strings.Contains(body, "context.WithTimeout(context.Background()") {
+		t.Error("handleRebuild 應以帶逾時的背景 ctx 執行重建")
 	}
 }

@@ -29,12 +29,13 @@ const sessionTTL = 12 * time.Hour
 
 // Server 管理界面服務器。
 type Server struct {
-	cfg       *config.Manager
-	tm        *tunnel.Manager
-	authStore *auth.Store
-	stats     *stats.Collector
-	register  func(ctx context.Context) (warp.Conf, error)
-	applier   func(c *config.Config) []string // 設置保存後的運行時套用器（main 注入；nil = 不套用）
+	cfg          *config.Manager
+	tm           *tunnel.Manager
+	authStore    *auth.Store
+	stats        *stats.Collector
+	register     func(ctx context.Context) (warp.Conf, error)
+	applier      func(c *config.Config) []string // 設置保存後的運行時套用器（main 注入；nil = 不套用）
+	egressSource func() map[string]string        // 帳號→實際出口映射（dispatcher 注入；nil = 用綁定值）
 
 	mu       sync.Mutex
 	sessions map[string]time.Time
@@ -60,6 +61,12 @@ func New(cfg *config.Manager, tm *tunnel.Manager, authStore *auth.Store, st *sta
 // 返回逐項套用報告（展示給管理員；空 = 無需套用）。
 func (s *Server) SetApplier(f func(c *config.Config) []string) {
 	s.applier = f
+}
+
+// SetEgressSource 注入帳號實際出口來源（全域延遲優先模式的黏住表）。
+// overview 的帳號視圖以此顯示實際出口；未注入或無資料時回退綁定上游。
+func (s *Server) SetEgressSource(f func() map[string]string) {
+	s.egressSource = f
 }
 
 // Handler 組裝路由。
@@ -273,6 +280,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		LastLatencyMS int64               `json:"last_latency_ms"`
 		LastError     string              `json:"last_error"`
 		Rebuilds      int64               `json:"rebuilds"`
+		Rebuilding    bool                `json:"rebuilding"`
 		Running       bool                `json:"running"`
 		Stats         stats.UpstreamStats `json:"stats"`
 	}
@@ -289,21 +297,33 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 			LastLatencyMS: st.LastLatency.Milliseconds(),
 			LastError:     st.LastError,
 			Rebuilds:      st.Rebuilds,
+			Rebuilding:    st.Rebuilding,
 			Running:       st.Running,
 			Stats:         snap.Upstreams[u.ID],
 		})
 	}
 
+	// 帳號實際出口：全域延遲優先模式下以 dispatcher 黏住表為準；否則回退綁定上游
+	var egress map[string]string
+	if s.egressSource != nil {
+		egress = s.egressSource()
+	}
 	type acctView struct {
 		Username string             `json:"username"`
 		Upstream string             `json:"upstream"`
+		Egress   string             `json:"egress"`
 		Stats    stats.AccountStats `json:"stats"`
 	}
 	accts := make([]acctView, 0, len(c.Upstreams))
 	for _, u := range c.Upstreams {
+		eg := u.ID
+		if id, ok := egress[u.Account.Username]; ok && id != "" {
+			eg = id
+		}
 		accts = append(accts, acctView{
 			Username: u.Account.Username,
 			Upstream: u.ID,
+			Egress:   eg,
 			Stats:    snap.Accounts[u.Account.Username],
 		})
 	}
@@ -454,7 +474,11 @@ func (s *Server) handleGetCredentials(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.tm.Rebuild(r.Context(), id); err != nil {
+	// 重建以獨立背景 ctx 執行：WireGuard 握手可達秒級，
+	// 綁架於請求 ctx 會因客戶端/代理逾時而中斷，隧道落入中間狀態。
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := s.tm.Rebuild(ctx, id); err != nil {
 		switch {
 		case errors.Is(err, tunnel.ErrTunnelNotFound):
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "隧道不存在（上游可能已刪除）"})
@@ -465,7 +489,8 @@ func (s *Server) handleRebuild(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	st, _ := s.tm.States()[id]
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "rebuilds": st.Rebuilds})
 }
 
 func (s *Server) handleRegenCredentials(w http.ResponseWriter, r *http.Request) {
