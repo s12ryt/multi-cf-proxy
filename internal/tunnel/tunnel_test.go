@@ -381,3 +381,149 @@ func TestLatencyProbeDisabled(t *testing.T) {
 		t.Fatalf("未設定間隔時不應有探測, probes=%d", got)
 	}
 }
+
+// --- v1.6.5：延遲排序選路 + 健康參數熱重載 ---
+
+// TestHealthySortedByLatency 健康隧道按最近探測延遲升序；
+// 未探測（延遲未知）殿後；同值保持配置順序。
+func TestHealthySortedByLatency(t *testing.T) {
+	var created []*fakeTunnel
+	m := NewManager(fakeFactory(&created), nil, time.Hour, 3)
+	if err := m.Sync(context.Background(), []*config.Upstream{
+		mkUpstream("u1", true), mkUpstream("u2", true), mkUpstream("u3", true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m.RecordProbe("u1", nil, 120*time.Millisecond)
+	m.RecordProbe("u2", nil, 50*time.Millisecond)
+	// u3 未探測 → 殿後；u2(50) < u1(120)
+	got := m.HealthySortedByLatency()
+	want := []string{"u2", "u1", "u3"}
+	if len(got) != len(want) {
+		t.Fatalf("應返回 3 條, got %d", len(got))
+	}
+	for i, id := range want {
+		if got[i].ID() != id {
+			t.Errorf("順序[%d] = %s, want %s", i, got[i].ID(), id)
+		}
+	}
+
+	// 同值穩定保序：u3 探測為 50ms 與 u2 相同 → u2 在前（配置順序）
+	m.RecordProbe("u3", nil, 50*time.Millisecond)
+	got = m.HealthySortedByLatency()
+	want = []string{"u2", "u3", "u1"}
+	for i, id := range want {
+		if got[i].ID() != id {
+			t.Errorf("同值保序[%d] = %s, want %s", i, got[i].ID(), id)
+		}
+	}
+}
+
+// TestHealthySortedByLatencyExcludesUnhealthy 不健康/停用的隧道不在清單。
+func TestHealthySortedByLatencyExcludesUnhealthy(t *testing.T) {
+	var created []*fakeTunnel
+	m := NewManager(fakeFactory(&created), nil, time.Hour, 2)
+	if err := m.Sync(context.Background(), []*config.Upstream{
+		mkUpstream("u1", true), mkUpstream("u2", true), mkUpstream("u3", false),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		m.RecordProbe("u2", errors.New("fail"), 0)
+	}
+	m.RecordProbe("u1", nil, 10*time.Millisecond)
+	got := m.HealthySortedByLatency()
+	if len(got) != 1 || got[0].ID() != "u1" {
+		t.Errorf("應僅剩健康的 u1, got %v", got)
+	}
+}
+
+// TestApplyHealthHotSwapsThreshold ApplyHealth 運行中熱套閾值：
+// 初始 3 → 套用 1 後單次失敗即不健康。
+func TestApplyHealthHotSwapsThreshold(t *testing.T) {
+	var created []*fakeTunnel
+	m := NewManager(fakeFactory(&created), nil, time.Hour, 3)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+	m.ApplyHealth(time.Hour, 1, 0, 0)
+	m.RecordProbe("u1", errors.New("fail"), 0)
+	if st := m.States()["u1"]; st.Healthy || st.ConsecutiveFails != 1 {
+		t.Errorf("threshold=1 時單次失敗應不健康: %+v", st)
+	}
+}
+
+// TestApplyHealthHotSwapsLatencyMax ApplyHealth 同步熱套延遲丟棄門檻。
+func TestApplyHealthHotSwapsLatencyMax(t *testing.T) {
+	var created []*fakeTunnel
+	m := NewManager(fakeFactory(&created), nil, time.Hour, 2)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+	m.ApplyHealth(time.Hour, 2, 50*time.Millisecond, 0)
+	m.RecordProbe("u1", nil, 80*time.Millisecond)
+	if st := m.States()["u1"]; st.ConsecutiveFails != 1 {
+		t.Errorf("超過熱套後的門檻應計為失敗: %+v", st)
+	}
+}
+
+// TestApplyHealthRebuildsTickers 巡檢運行中熱套 interval：
+// 500ms → 25ms 後，短時間內探測次數應顯著增加。
+func TestApplyHealthRebuildsTickers(t *testing.T) {
+	var created []*fakeTunnel
+	var probes atomic.Int64
+	probeFn := func(ctx context.Context, d Dialer) (time.Duration, error) {
+		probes.Add(1)
+		return time.Millisecond, nil
+	}
+	m := NewManager(fakeFactory(&created), probeFn, 500*time.Millisecond, 3)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	time.Sleep(150 * time.Millisecond) // 舊節奏（500ms）下至多 1 次
+	before := probes.Load()
+	m.ApplyHealth(25*time.Millisecond, 3, 0, 0)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for probes.Load()-before < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := probes.Load() - before; got < 3 {
+		t.Fatalf("熱套 interval=25ms 後應快速累積探測,新增 %d 次", got)
+	}
+}
+
+// TestApplyHealthStartsLatencyLoop 運行中從 0 打開獨立延遲探測循環。
+func TestApplyHealthStartsLatencyLoop(t *testing.T) {
+	var created []*fakeTunnel
+	var probes atomic.Int64
+	probeFn := func(ctx context.Context, d Dialer) (time.Duration, error) {
+		probes.Add(1)
+		return time.Millisecond, nil
+	}
+	m := NewManager(fakeFactory(&created), probeFn, time.Hour, 3)
+	if err := m.Sync(context.Background(), []*config.Upstream{mkUpstream("u1", true)}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	time.Sleep(100 * time.Millisecond)
+	if got := probes.Load(); got != 0 {
+		t.Fatalf("前置條件：不應有探測, got %d", got)
+	}
+	m.ApplyHealth(time.Hour, 3, 0, 30*time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for probes.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := probes.Load(); got < 2 {
+		t.Fatalf("熱套 probeIvl=30ms 後應啟動獨立循環, probes=%d", got)
+	}
+}

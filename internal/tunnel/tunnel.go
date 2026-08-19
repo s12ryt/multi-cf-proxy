@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -90,12 +91,13 @@ type Manager struct {
 	mu         sync.RWMutex
 	factory    Factory
 	probe      ProbeFunc
-	interval   time.Duration
-	threshold  int
-	latencyMax time.Duration // 0 = 停用；超過時視為一次探測失敗
+	interval   time.Duration // 健康巡檢間隔（可運行中熱套）
+	threshold  int           // 不健康判定閾值（可運行中熱套）
+	latencyMax time.Duration // 0 = 停用；超過時視為一次探測失敗（可運行中熱套）
 	dnsTTL     time.Duration // 經隧道 DNS 快取 TTL（0 = 停用）
 	dnsTTLSet  bool          // SetDNSCacheTTL 被呼叫過（Sync 時套用到新建隧道）
-	probeIvl   time.Duration // 獨立延遲探測間隔（0 = 隨健康循環）
+	probeIvl   time.Duration // 獨立延遲探測間隔（0 = 隨健康循環；可運行中熱套）
+	reload     chan struct{} // 熱套信號：Run 循環收到後重建 ticker
 	entries    map[string]*tunnelEntry
 	order      []string // 保持配置順序
 }
@@ -139,7 +141,23 @@ func NewManager(factory Factory, probe ProbeFunc, interval time.Duration, thresh
 		probe:     probe,
 		interval:  interval,
 		threshold: threshold,
+		reload:    make(chan struct{}, 1),
 		entries:   map[string]*tunnelEntry{},
+	}
+}
+
+// ApplyHealth 運行中熱套健康巡檢參數（Web 設置保存即生效路徑）。
+// 四項參數全量套用；Run 循環收到 reload 信號後以新 interval/probeIvl 重建 ticker。
+func (m *Manager) ApplyHealth(interval time.Duration, threshold int, latencyMax, probeIvl time.Duration) {
+	m.mu.Lock()
+	m.interval = interval
+	m.threshold = threshold
+	m.latencyMax = latencyMax
+	m.probeIvl = probeIvl
+	m.mu.Unlock()
+	select {
+	case m.reload <- struct{}{}:
+	default:
 	}
 }
 
@@ -303,6 +321,33 @@ func (m *Manager) Healthy() []Tunnel {
 	return out
 }
 
+// HealthySortedByLatency 返回健康隧道，按最近一次成功探測延遲升序；
+// 未探測過（延遲未知）的殿後；同值保持配置順序（穩定排序）。
+// 供延遲優選選路使用。
+func (m *Manager) HealthySortedByLatency() []Tunnel {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []Tunnel
+	lat := make(map[string]time.Duration, len(m.order))
+	for _, id := range m.order {
+		if e, ok := m.entries[id]; ok && e.running && e.state.Healthy {
+			out = append(out, e.tunnel)
+			lat[id] = e.state.LastLatency
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		li, lj := lat[out[i].ID()], lat[out[j].ID()]
+		if li == 0 {
+			return false // 未知延遲殿後（同為未知保持原序）
+		}
+		if lj == 0 {
+			return true
+		}
+		return li < lj
+	})
+	return out
+}
+
 // States 返回全部隧道狀態快照。
 func (m *Manager) States() map[string]State {
 	m.mu.RLock()
@@ -365,50 +410,76 @@ func (m *Manager) RecordProbe(id string, probeErr error, latency time.Duration) 
 }
 
 // SetLatencyProbeInterval 設定獨立延遲探測間隔（0 = 停用，延遲隨健康檢查更新）。
-// 需於 Run 前呼叫（main 依配置設置，重啟生效）。
+// 可在 Run 前或運行中呼叫（運行中呼叫經 reload 信號重建探測循環）。
 func (m *Manager) SetLatencyProbeInterval(d time.Duration) {
 	m.mu.Lock()
 	m.probeIvl = d
 	m.mu.Unlock()
+	select {
+	case m.reload <- struct{}{}:
+	default:
+	}
 }
 
 // Run 啟動健康巡檢循環（與可選的獨立延遲探測循環），直到 ctx 結束。
+// 收到熱套信號（ApplyHealth/SetLatencyProbeInterval）後以新參數重建 ticker。
 func (m *Manager) Run(ctx context.Context) {
-	ticker := time.NewTicker(m.interval)
-	defer ticker.Stop()
+	healthT := time.NewTicker(m.interval)
+	defer healthT.Stop()
 
-	m.mu.RLock()
-	probeIvl := m.probeIvl
-	m.mu.RUnlock()
-
-	latencyTick := make(chan time.Time, 1)
-	if probeIvl > 0 {
-		lt := time.NewTicker(probeIvl)
-		defer lt.Stop()
+	latTick := make(chan time.Time, 1)
+	var latStop chan struct{}
+	stopLatency := func() {
+		if latStop != nil {
+			close(latStop)
+			latStop = nil
+		}
+	}
+	startLatency := func() {
+		m.mu.RLock()
+		ivl := m.probeIvl
+		m.mu.RUnlock()
+		if ivl <= 0 {
+			return
+		}
+		stop := make(chan struct{})
+		latStop = stop
+		lt := time.NewTicker(ivl)
 		go func() {
-			defer close(latencyTick)
+			defer lt.Stop()
 			for {
 				select {
 				case <-ctx.Done():
 					return
+				case <-stop:
+					return
 				case t := <-lt.C:
 					select {
-					case latencyTick <- t:
+					case latTick <- t:
 					default:
 					}
 				}
 			}
 		}()
 	}
+	defer stopLatency()
+	startLatency()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-healthT.C:
 			m.probeAll(ctx)
-		case <-latencyTick:
+		case <-latTick:
 			m.probeAll(ctx) // 同一探測路徑：更新延遲、計入丟棄與連續失敗判定
+		case <-m.reload:
+			m.mu.RLock()
+			ivl := m.interval
+			m.mu.RUnlock()
+			healthT.Reset(ivl)
+			stopLatency()
+			startLatency()
 		}
 	}
 }
@@ -423,9 +494,10 @@ func (m *Manager) probeAll(ctx context.Context) {
 			dialers[id] = e.tunnel
 		}
 	}
+	interval := m.interval
 	m.mu.RUnlock()
 
-	probeTimeout := m.interval / 2
+	probeTimeout := interval / 2
 	if probeTimeout <= 0 || probeTimeout > 8*time.Second {
 		probeTimeout = 8 * time.Second
 	}
