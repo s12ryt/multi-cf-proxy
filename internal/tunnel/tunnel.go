@@ -3,8 +3,10 @@ package tunnel
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sort"
@@ -61,28 +63,57 @@ type Factory func(u *config.Upstream) (Tunnel, error)
 type ProbeFunc func(ctx context.Context, d Dialer) (time.Duration, error)
 
 // probeURL 健康探測目標：Cloudflare 官方 1.1.1.1 的 trace 端點（TLS 證書有效）。
-// 採 IP 直連——避免域名解析經隧道 DNS 污染延遲量測（快取 TTL 與探測間隔
-// 不同步時每隔數輪多付一次 DNS 往返），量得純路徑延遲（TCP+TLS+HTTP）。
-const probeURL = "https://1.1.1.1/cdn-cgi/trace"
+// 採 IP 直連——避免域名解析經隧道 DNS 污染延遲量測。
+// var（非 const）：測試以 httptest 伺服器覆蓋目標驗證量測行為。
+var probeURL = "https://1.1.1.1/cdn-cgi/trace"
 
-// DefaultProbe 經隧道訪問 Cloudflare trace 端點驗證连通性。
+// probeTLSConfig 僅測試注入（httptest 自簽證書需 InsecureSkipVerify）；正式路徑恆為 nil。
+var probeTLSConfig *tls.Config
+
+// DefaultProbe 經隧道驗證數據路徑並量測穩態請求延遲：
+// 每輪發兩個請求（同一 Transport，keep-alive 復用）——
+//   - 第一個走完整冷路徑（TCP+TLS+HTTP），作為健康驗證，不計時；
+//     冷 HTTPS ≈ 3×RTT 是握手結構的數學必然，不應反映為「延遲」。
+//   - 第二個復用已建立連線（≈1×RTT），計時——貼近真實瀏覽體驗
+//     （瀏覽器/撥號 p50 皆為已建立連線上的 1×RTT）。
 func DefaultProbe(ctx context.Context, d Dialer) (time.Duration, error) {
-	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
-	if err != nil {
-		return 0, err
+	transport := &http.Transport{
+		DialContext:           d.DialContext,
+		DisableKeepAlives:     false,
+		MaxIdleConnsPerHost:   1,
+		TLSClientConfig:       probeTLSConfig,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
 	}
-	transport := &http.Transport{DialContext: d.DialContext, DisableKeepAlives: true}
 	client := &http.Client{Transport: transport, Timeout: 8 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
+	defer transport.CloseIdleConnections() // 每輪自清：不跨輪持久化探測連線
+
+	if err := probeGet(ctx, client, probeURL); err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("trace 返回 HTTP %d", resp.StatusCode)
+	start := time.Now()
+	if err := probeGet(ctx, client, probeURL); err != nil {
+		return 0, err
 	}
 	return time.Since(start), nil
+}
+
+// probeGet 發出單個 trace 請求並驗證回應；body 讀盡以允許連線復用。
+func probeGet(ctx context.Context, c *http.Client, url string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("trace 返回 HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 type tunnelEntry struct {

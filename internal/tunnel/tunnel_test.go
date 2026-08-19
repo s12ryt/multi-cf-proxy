@@ -2,9 +2,13 @@ package tunnel
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
@@ -781,5 +785,54 @@ func TestProbeTargetIsIPLiteral(t *testing.T) {
 	}
 	if !strings.HasSuffix(u.Path, "/cdn-cgi/trace") {
 		t.Errorf("探測路徑應為 Cloudflare trace 端點, got %q", u.Path)
+	}
+}
+
+// probeDialerFunc 把撥號函數適配為 Dialer（測試用）。
+type probeDialerFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+func (f probeDialerFunc) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return f(ctx, network, addr)
+}
+
+// TestProbeMeasuresWarmSteadyState 探測量測語意（v1.6.11 起）：
+// 每輪兩個請求——冷請求驗證完整路徑（不計時），穩態請求復用 keep-alive
+// 連線計時（≈1×RTT）。冷 HTTPS 是 3×RTT 的數學必然，量測不應包含它。
+func TestProbeMeasuresWarmSteadyState(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch hits.Add(1) {
+		case 1:
+			time.Sleep(150 * time.Millisecond) // 模擬冷請求（握手）額外成本——不應計入
+		case 2:
+			time.Sleep(30 * time.Millisecond) // 穩態請求的服務延遲——量測應涵蓋
+		}
+		io.WriteString(w, "fl=web\n")
+	}))
+	defer srv.Close()
+
+	oldURL, oldTLS := probeURL, probeTLSConfig
+	probeURL = srv.URL
+	probeTLSConfig = &tls.Config{InsecureSkipVerify: true} // 僅測試：信任 httptest 自簽證書
+	defer func() { probeURL, probeTLSConfig = oldURL, oldTLS }()
+
+	d := probeDialerFunc(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var nd net.Dialer
+		return nd.DialContext(ctx, "tcp", srv.Listener.Addr().String())
+	})
+
+	lat, err := DefaultProbe(context.Background(), d)
+	if err != nil {
+		t.Fatalf("DefaultProbe: %v", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("每輪探測應發出冷+穩態兩個請求, got %d", got)
+	}
+	// 量測涵蓋第二請求（30ms 服務延遲）但不含第一請求的 150ms 冷啟動
+	if lat < 15*time.Millisecond {
+		t.Errorf("量測應涵蓋穩態請求的服務延遲（≈30ms）, got %v", lat)
+	}
+	if lat >= 100*time.Millisecond {
+		t.Errorf("量測不應包含冷啟動 150ms, got %v", lat)
 	}
 }
