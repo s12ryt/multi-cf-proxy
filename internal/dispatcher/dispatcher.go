@@ -32,6 +32,8 @@ type Registry interface {
 	HealthySortedByLatency() []tunnel.Tunnel
 	// IsHealthy 查詢指定上游健康狀態。
 	IsHealthy(upstreamID string) bool
+	// Latency 返回 EMA 平滑延遲；0 表示尚無讀數。
+	Latency(upstreamID string) time.Duration
 }
 
 // Service 鑑權選路服務。
@@ -43,7 +45,8 @@ type Service struct {
 
 	rmu    sync.Mutex
 	prefer bool              // 全域延遲優先模式
-	sticky map[string]string // 帳號→實際出口（僅觀測用：UI 出口欄；不參與選路決策）
+	margin time.Duration     // 延遲型換黏容差；0 = 僅不通才飄移
+	sticky map[string]string // 帳號→黏住出口（參與選路：健康時恆為首選）
 }
 
 // NewService 建立服務；dialTimeout 為單次上游撥號超時（默認 15 秒）。
@@ -57,12 +60,16 @@ func NewService(a *auth.Store, r Registry, s *stats.Collector) *Service {
 	}
 }
 
-// SetLatencyRouting 熱套延遲優先模式（Web 設置保存即生效路徑）。
-// prefer=false 時回到「綁定優先」行為；模式切換清空觀測用黏住表。
-func (s *Service) SetLatencyRouting(prefer bool) {
+// SetLatencyRouting 熱套延遲優先模式與換黏容差（Web 設置保存即生效路徑）。
+// prefer=false 時回到「綁定優先」行為；模式切換清空黏住表，單獨改容差則保留。
+// marginMS=0 表示永不因延遲換黏——僅黏住出口不通時才飄移。
+func (s *Service) SetLatencyRouting(prefer bool, marginMS int) {
 	s.rmu.Lock()
+	if s.prefer != prefer {
+		s.sticky = map[string]string{}
+	}
 	s.prefer = prefer
-	s.sticky = map[string]string{}
+	s.margin = time.Duration(marginMS) * time.Millisecond
 	s.rmu.Unlock()
 }
 
@@ -101,7 +108,7 @@ func (s *Service) Route(ctx context.Context, username, password, network, addr s
 	return nil, "", fmt.Errorf("全部候選上游撥號失敗，最後錯誤: %w", lastErr)
 }
 
-// rememberSticky 全域優先模式下記錄帳號實際使用的出口（漂移/故障轉移後更新黏住目標）。
+// rememberSticky 全域優先模式下記錄帳號實際使用的出口（飄移/故障轉移後更新黏住目標）。
 func (s *Service) rememberSticky(username, upstreamID string) {
 	s.rmu.Lock()
 	if s.prefer {
@@ -124,17 +131,19 @@ func (s *Service) EgressSnapshot() map[string]string {
 
 // candidates 生成嘗試順序：
 //   - 默認：綁定上游健康時優先；備援清單按最近探測延遲升序（快者先試）。
-//   - 全域延遲優先：取健康清單（按 EMA 平滑延遲升序、未知殿後），
-//     首位即目標（純最低，無容差閘門），其餘為撥號失敗時的降級序。
+//   - 全域延遲優先：黏住出口健康時恆為首位；僅不通（或超出容差）才飄移，
+//     其餘為撥號失敗時的降級序。
 func (s *Service) candidates(username, boundID string) []tunnel.Tunnel {
 	sorted := s.registry.HealthySortedByLatency()
 
 	s.rmu.Lock()
 	prefer := s.prefer
+	margin := s.margin
+	cur := s.sticky[username]
 	s.rmu.Unlock()
 
 	if prefer {
-		return sorted
+		return s.preferOrder(sorted, cur, margin)
 	}
 
 	var out []tunnel.Tunnel
@@ -150,4 +159,54 @@ func (s *Service) candidates(username, boundID string) []tunnel.Tunnel {
 		}
 	}
 	return out
+}
+
+// preferOrder 全域模式候選序：首位＝黏住出口（健康時），不通才改選飄移目標；
+// margin > 0 時，最快者比黏住出口快超過容差才換黏（雙方延遲均需已知）。
+func (s *Service) preferOrder(sorted []tunnel.Tunnel, cur string, margin time.Duration) []tunnel.Tunnel {
+	if len(sorted) == 0 {
+		return nil
+	}
+	head := s.driftTarget(sorted)
+	if stick := pick(sorted, cur); stick != nil {
+		head = stick
+		if best := s.driftTarget(sorted); margin > 0 && best.ID() != cur {
+			cl, bl := s.registry.Latency(cur), s.registry.Latency(best.ID())
+			if cl > 0 && bl > 0 && cl-bl > margin {
+				head = best
+			}
+		}
+	}
+	out := make([]tunnel.Tunnel, 0, len(sorted))
+	out = append(out, head)
+	for _, t := range sorted {
+		if t.ID() != head.ID() {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// driftTarget 飄移目標：延遲最低且已知者（抑制重建後歸零的隧道搶首位）；
+// 全清單皆無讀數時退回首位。
+func (s *Service) driftTarget(sorted []tunnel.Tunnel) tunnel.Tunnel {
+	for _, t := range sorted {
+		if s.registry.Latency(t.ID()) > 0 {
+			return t
+		}
+	}
+	return sorted[0]
+}
+
+// pick 依 ID 取出清單中的隧道；id 為空或不在清單返回 nil。
+func pick(list []tunnel.Tunnel, id string) tunnel.Tunnel {
+	if id == "" {
+		return nil
+	}
+	for _, t := range list {
+		if t.ID() == id {
+			return t
+		}
+	}
+	return nil
 }

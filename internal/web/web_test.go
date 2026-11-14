@@ -629,7 +629,7 @@ func TestSettingsRoutingAndApplier(t *testing.T) {
 
 	// routing 設置保存 + applier 觸發
 	body := map[string]any{
-		"routing": map[string]any{"prefer_lowest_latency": true},
+		"routing": map[string]any{"prefer_lowest_latency": true, "switch_margin_ms": 25},
 	}
 	resp, jbody := e.do(t, "PUT", "/api/settings", body, &ck)
 	if resp.StatusCode != 200 {
@@ -640,6 +640,9 @@ func TestSettingsRoutingAndApplier(t *testing.T) {
 	}
 	if appliedCfg == nil || !appliedCfg.Routing.PreferLowestLatency {
 		t.Errorf("applier 應收到保存後的新配置: %+v", appliedCfg)
+	}
+	if appliedCfg != nil && appliedCfg.Routing.SwitchMarginMS != 25 {
+		t.Errorf("applier 應收到 switch_margin_ms = %d, want 25", appliedCfg.Routing.SwitchMarginMS)
 	}
 	if note, _ := jbody["note"].(string); strings.Contains(note, "重啟") {
 		t.Errorf("回應不應再提示重啟: %q", note)
@@ -659,8 +662,8 @@ func TestSettingsRoutingAndApplier(t *testing.T) {
 	if v, _ := rt["prefer_lowest_latency"].(bool); !v {
 		t.Errorf("overview routing.prefer_lowest_latency = %#v, want true", rt["prefer_lowest_latency"])
 	}
-	if _, has := rt["switch_margin_ms"]; has {
-		t.Error("overview 不應再暴露已移除的 switch_margin_ms")
+	if v, _ := rt["switch_margin_ms"].(float64); v != 25 {
+		t.Errorf("overview routing.switch_margin_ms = %#v, want 25", rt["switch_margin_ms"])
 	}
 }
 

@@ -34,6 +34,7 @@ type runtimeSnap struct {
 	probe     int
 	dns       int
 	prefer    bool
+	margin    int
 	socks     string
 	httpA     string
 	webA      string
@@ -81,7 +82,7 @@ func main() {
 	authStore := auth.NewStore(nil)
 	collector := stats.NewCollector()
 	svc := dispatcher.NewService(authStore, dispatcher.NewRegistry(tm), collector)
-	svc.SetLatencyRouting(c.Routing.PreferLowestLatency)
+	svc.SetLatencyRouting(c.Routing.PreferLowestLatency, c.Routing.SwitchMarginMS)
 
 	// 三個監聽服務（支持端口熱重載）
 	ls := listen.New()
@@ -114,6 +115,7 @@ func main() {
 			probe:     c.HealthCheck.LatencyProbeSeconds,
 			dns:       c.DNSCacheSeconds,
 			prefer:    c.Routing.PreferLowestLatency,
+			margin:    c.Routing.SwitchMarginMS,
 			socks:     c.ListenSocks5,
 			httpA:     c.ListenHTTP,
 			webA:      c.ListenWeb,
@@ -140,8 +142,8 @@ func main() {
 				notes = append(notes, "DNS 快取已即時套用")
 			}
 		}
-		if cur.prefer != next.prefer {
-			svc.SetLatencyRouting(next.prefer)
+		if cur.prefer != next.prefer || cur.margin != next.margin {
+			svc.SetLatencyRouting(next.prefer, next.margin)
 			notes = append(notes, "延遲優選已即時套用")
 		}
 		for _, sw := range []struct{ name, cur, next string }{

@@ -17,8 +17,8 @@ active health checks, automatic tunnel rebuilds, egress failover and traffic acc
 - **Multiple WARP instances**: userspace WireGuard (wireguard-go + gVisor netstack) — no TUN device, no root
 - **Dual-protocol inbound**: SOCKS5 (RFC 1928/1929, username/password auth only) and HTTP proxy (Basic + CONNECT) on separate ports
 - **Credential-bound egress**: every upstream gets an auto-generated random `username:password`; if the bound egress goes unhealthy, traffic fails over to other healthy egresses
-- **Latency-preferred routing**: failover candidates are ordered by EMA-smoothed probe latency (fastest first); optional "global lowest-latency" mode — every account is routed to the currently lowest-latency healthy egress (dial failures fall through in latency order)
-- **Fully automatic reconnection**: periodic health probes (Cloudflare trace at 1.1.1.1 via tunnel; keep-alive steady-state timing ≈1×RTT matching real connections, cold path still fully verified each round) → consecutive failures reach threshold → marked unhealthy, tunnel auto-rebuilt → returns to the healthy pool once probes recover
+- **Latency-preferred routing**: failover candidates are ordered by EMA-smoothed probe latency (fastest first); optional "global lowest-latency" mode — **each account sticks to one egress and only drifts when that egress is unreachable**, then picks the currently lowest-latency healthy egress (`switch_margin_ms` > 0 also re-sticks when another egress is faster by more than that many milliseconds)
+- **Fully automatic reconnection**: health probes every 5s (three sites probed in parallel through the tunnel — 1.1.1.1 / 8.8.8.8 / 9.9.9.9; any success counts as reachable, a full sweep failure is retried once after 0.5s; keep-alive steady-state timing ≈1×RTT) → consecutive failures reach the threshold (3 by default) → marked unhealthy, tunnel auto-rebuilt → **a readiness probe must pass before the tunnel is marked healthy again** (the WireGuard handshake needs 1–2 RTTs; device creation alone does not mean usable) → probe failures during the following 30s cooldown are neither counted nor allowed to trigger another rebuild (prevents the next sweep from tearing down a handshake in progress, i.e. a rebuild storm) → returns to the healthy pool once probes recover
 - **Traffic accounting**: per-account / per-upstream up/down bytes, IPv4 / IPv6 separated
 - **Web admin**: admin-password login (session), upstream CRUD, automatic WARP account registration, manual wgcf config import, credential regeneration, settings, stats
 - **Single static binary**: written in Go, cross-compiles to Linux amd64/arm64, no runtime dependencies
@@ -109,8 +109,8 @@ automatically fail over to another healthy egress.
   "listen_http": ":8080",
   "listen_web": ":8081",
   "dns_cache_seconds": 60,
-  "routing": { "prefer_lowest_latency": false },
-  "health_check": { "interval_seconds": 30, "failure_threshold": 3, "latency_discard_seconds": 0, "latency_probe_seconds": 0 },
+  "routing": { "prefer_lowest_latency": false, "switch_margin_ms": 0 },
+  "health_check": { "interval_seconds": 5, "failure_threshold": 3, "latency_discard_seconds": 0, "latency_probe_seconds": 0 },
   "upstreams": [
     {
       "id": "uXXXXXXXX",
@@ -150,7 +150,7 @@ internal/web        admin API (session) + embedded frontend
 
 - SOCKS5 UDP ASSOCIATE is not supported (TCP CONNECT only)
 - Automatic WARP registration depends on Cloudflare API availability; when rate-limited, register manually with wgcf and import the config
-- In global lowest-latency mode the egress IP drifts as latencies change (keep it off if you need a stable IP for website sessions)
+- In global lowest-latency mode the egress IP only changes when the sticky egress goes down (`switch_margin_ms` > 0 additionally enables latency-based re-sticking)
 - Account passwords are shown in full only once at generation time (never echoed on the overview page)
 
 ## Development

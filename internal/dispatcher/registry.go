@@ -2,6 +2,7 @@ package dispatcher
 
 import (
 	"errors"
+	"time"
 
 	"multi-cf-proxy/internal/tunnel"
 )
@@ -33,4 +34,9 @@ func (r *tunnelManagerRegistry) HealthySortedByLatency() []tunnel.Tunnel {
 func (r *tunnelManagerRegistry) IsHealthy(upstreamID string) bool {
 	st, ok := r.tm.States()[upstreamID]
 	return ok && st.Healthy && st.Running
+}
+
+// Latency 返回 EMA 平滑延遲；0 表示尚無讀數（含重建後歸零）。
+func (r *tunnelManagerRegistry) Latency(upstreamID string) time.Duration {
+	return r.tm.States()[upstreamID].LastLatency
 }

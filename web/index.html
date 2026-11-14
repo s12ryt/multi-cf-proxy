@@ -580,7 +580,7 @@ function openSettings() {
       <div><label for="setWeb">Web 監聽</label><input id="setWeb" value="${esc(s.listen_web || ':8081')}"></div>
     </div>
     <div class="row">
-      <div><label for="setInterval">健康檢查間隔（秒）</label><input type="number" id="setInterval" value="${s.health?.interval_seconds ?? 30}"></div>
+      <div><label for="setInterval">健康檢查間隔（秒）</label><input type="number" id="setInterval" value="${s.health?.interval_seconds ?? 5}"></div>
       <div><label for="setThreshold">失敗閾值（次）</label><input type="number" id="setThreshold" value="${s.health?.failure_threshold ?? 3}"></div>
       <div><label for="setLatency">延遲過高丟棄（秒，0=停用）</label><input type="number" id="setLatency" min="0" step="0.1" value="${s.health?.latency_discard_seconds ?? 0}"></div>
     </div>
@@ -589,10 +589,13 @@ function openSettings() {
       <div><label for="setDNSCache">DNS 快取（秒，0=停用）</label><input type="number" id="setDNSCache" min="0" value="${s.dns_cache_seconds ?? 60}"></div>
     </div>
     <div class="row">
-      <div class="chk"><label for="setPrefer"><input type="checkbox" id="setPrefer" ${s.routing?.prefer_lowest_latency ? 'checked' : ''}> 全域延遲優先</label><span class="hint-inline">忽略帳密綁定，一律走當前延遲最低的健康出口</span></div>
+      <div class="chk"><label for="setPrefer"><input type="checkbox" id="setPrefer" ${s.routing?.prefer_lowest_latency ? 'checked' : ''}> 全域延遲優先</label><span class="hint-inline">忽略帳密綁定，每個帳號黏住一個出口</span></div>
+    </div>
+    <div class="row">
+      <div><label for="setMargin">換黏容差（毫秒，0=僅不通才飄移）</label><input type="number" id="setMargin" min="0" value="${s.routing?.switch_margin_ms ?? 0}"></div>
     </div>
     <div style="margin-top:14px"><button class="ghost" id="btn-set" onclick="saveSettings()">保存設置</button></div>
-    <p class="hint">全部設置保存後即時生效（含端口與健康參數）；若變更了 Web 監聽地址，請以新地址重新開啟管理頁。延遲連續超標會視為探測失敗並重建；域名 DNS 結果經 WARP 解析後於本機快取指定秒數（0=每次都解析）；開啟全域延遲優先後所有帳號走當前延遲最低（EMA 平滑）的健康出口，出口 IP 會隨延遲變化而切換。</p>
+    <p class="hint">全部設置保存後即時生效（含端口與健康參數）；若變更了 Web 監聽地址，請以新地址重新開啟管理頁。延遲連續超標會視為探測失敗並重建；域名 DNS 結果經 WARP 解析後於本機快取指定秒數（0=每次都解析）；開啟全域延遲優先後每個帳號黏住一個出口，僅該出口不通時才飄移到當前延遲最低（EMA 平滑）的健康出口；換黏容差大於 0 時，另一出口快超過該毫秒數也會換黏。</p>
     <hr style="border:none;border-top:1px solid var(--line);margin:18px 0 6px">
     <label for="newPw">修改管理員密碼（新密碼 ≥8 位）</label>
     <div class="row">
@@ -630,13 +633,14 @@ async function saveSettings() {
       listen_socks5: $('setSocks').value, listen_http: $('setHttp').value, listen_web: $('setWeb').value,
       dns_cache_seconds: parseInt($('setDNSCache').value || '60'),
       health: {
-        interval_seconds: parseInt($('setInterval').value || '30'),
-        failure_threshold: parseInt($('setThreshold').value || '3'),
+        interval_seconds: parseInt($('setInterval').value || '5'),
+        failure_threshold: parseInt($('setThreshold').value || '1'),
         latency_discard_seconds: parseFloat($('setLatency').value || '0'),
         latency_probe_seconds: parseInt($('setProbe').value || '0'),
       },
       routing: {
         prefer_lowest_latency: $('setPrefer').checked,
+        switch_margin_ms: parseInt($('setMargin').value || '0'),
       },
     });
     toast(true, (r.applied && r.applied.length) ? r.applied.join('；') : '設置已保存並即時生效');

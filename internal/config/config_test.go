@@ -19,8 +19,8 @@ func TestDefault(t *testing.T) {
 	if c.ListenWeb != ":8081" {
 		t.Errorf("ListenWeb = %q, want :8081", c.ListenWeb)
 	}
-	if c.HealthCheck.IntervalSeconds != 30 {
-		t.Errorf("HealthCheck.IntervalSeconds = %d, want 30", c.HealthCheck.IntervalSeconds)
+	if c.HealthCheck.IntervalSeconds != 5 {
+		t.Errorf("HealthCheck.IntervalSeconds = %d, want 5", c.HealthCheck.IntervalSeconds)
 	}
 	if c.HealthCheck.FailureThreshold != 3 {
 		t.Errorf("HealthCheck.FailureThreshold = %d, want 3", c.HealthCheck.FailureThreshold)
@@ -165,7 +165,7 @@ func TestFillDefaultsKeepsExplicitValues(t *testing.T) {
 	if c.ListenHTTP != ":8080" {
 		t.Errorf("空字段應補默認: %q", c.ListenHTTP)
 	}
-	if c.HealthCheck.IntervalSeconds != 30 {
+	if c.HealthCheck.IntervalSeconds != 5 {
 		t.Errorf("健康檢查空值應補默認: %+v", c.HealthCheck)
 	}
 	// 延遲丟棄 0 = 停用，屬合法值，不應被 FillDefaults 改寫
@@ -199,6 +199,8 @@ func TestValidate(t *testing.T) {
 		{"健康檢查間隔為零", func(c *Config) { c.HealthCheck.IntervalSeconds = 0 }, true},
 		{"延遲丟棄秒數為負", func(c *Config) { c.HealthCheck.LatencyDiscardSeconds = -0.5 }, true},
 		{"延遲丟棄零表示停用", func(c *Config) { c.HealthCheck.LatencyDiscardSeconds = 0 }, false},
+		{"切換容差為負", func(c *Config) { c.Routing.SwitchMarginMS = -1 }, true},
+		{"切換容差零表示僅不通才飄移", func(c *Config) { c.Routing.SwitchMarginMS = 0 }, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -223,8 +225,8 @@ func TestUpstreamByID(t *testing.T) {
 	}
 }
 
-// TestLoadLegacyMarginKeyIgnored v1.6.9 移除 switch_margin_ms：存量配置含此鍵不加載不報錯（未知鍵靜默忽略）。
-func TestLoadLegacyMarginKeyIgnored(t *testing.T) {
+// TestLoadMarginKeyApplied v1.7.0 回歸 switch_margin_ms：存量配置中的該鍵應被讀入（0 = 僅不通才飄移）。
+func TestLoadMarginKeyApplied(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	raw := `{"routing":{"prefer_lowest_latency":true,"switch_margin_ms":20}}`
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
@@ -236,6 +238,9 @@ func TestLoadLegacyMarginKeyIgnored(t *testing.T) {
 	}
 	if !c.Routing.PreferLowestLatency {
 		t.Error("prefer_lowest_latency 應保留")
+	}
+	if c.Routing.SwitchMarginMS != 20 {
+		t.Errorf("switch_margin_ms 應被讀入 = %d, want 20", c.Routing.SwitchMarginMS)
 	}
 	if err := c.Validate(); err != nil {
 		t.Errorf("Validate 應通過: %v", err)

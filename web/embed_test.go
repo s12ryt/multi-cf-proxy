@@ -61,6 +61,9 @@ func TestIndexHTMLContract(t *testing.T) {
 		{"帳號實際出口鍵", "egress"},
 		{"出口漂移標記", "漂移"},
 		{"重建完成行閃爍", "flash-row"},
+		// v1.7.0：黏性出口 + 延遲型換黏容差回歸
+		{"換黏容差設置鍵", "switch_margin_ms"},
+		{"換黏容差設置輸入", "setMargin"},
 	}
 	for _, m := range mustContain {
 		if !strings.Contains(html, m.substr) {
@@ -75,9 +78,6 @@ func TestIndexHTMLContract(t *testing.T) {
 		{"原生 confirm（阻塞且樣式突兀）", "confirm("},
 		{"外鏈字體（離線/VPS 環境不可達）", "fonts.googleapis"},
 		{"外鏈 CDN 腳本（單檔自足原則）", "https://cdn"},
-		// v1.6.9：switch_margin_ms 已移除（純最低語意），UI 不得殘留
-		{"已移除的切換容差鍵", "switch_margin_ms"},
-		{"已移除的切換容差輸入", "setMargin"},
 	}
 	for _, m := range mustNotContain {
 		if strings.Contains(html, m.substr) {

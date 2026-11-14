@@ -572,6 +572,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		} `json:"health"`
 		Routing *struct {
 			PreferLowestLatency *bool `json:"prefer_lowest_latency"` // nil = 不變
+			SwitchMarginMS      *int  `json:"switch_margin_ms"`      // 0 = 僅不通才飄移
 		} `json:"routing"`
 	}
 	if err := readJSON(r, &body); err != nil {
@@ -609,6 +610,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if body.Routing != nil {
 			if body.Routing.PreferLowestLatency != nil {
 				c.Routing.PreferLowestLatency = *body.Routing.PreferLowestLatency
+			}
+			if body.Routing.SwitchMarginMS != nil {
+				c.Routing.SwitchMarginMS = *body.Routing.SwitchMarginMS
 			}
 		}
 		return c.Validate()

@@ -3,12 +3,9 @@ package tunnel
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"sort"
 	"sync"
 	"time"
@@ -62,65 +59,20 @@ type Factory func(u *config.Upstream) (Tunnel, error)
 // ProbeFunc 健康探測函數：返回延遲或錯誤。
 type ProbeFunc func(ctx context.Context, d Dialer) (time.Duration, error)
 
-// probeURL 健康探測目標：Cloudflare 官方 1.1.1.1 的 trace 端點（TLS 證書有效）。
-// 採 IP 直連——避免域名解析經隧道 DNS 污染延遲量測。
-// var（非 const）：測試以 httptest 伺服器覆蓋目標驗證量測行為。
-var probeURL = "https://1.1.1.1/cdn-cgi/trace"
-
-// probeTLSConfig 僅測試注入（httptest 自簽證書需 InsecureSkipVerify）；正式路徑恆為 nil。
-var probeTLSConfig *tls.Config
-
-// DefaultProbe 經隧道驗證數據路徑並量測穩態請求延遲：
-// 每輪發兩個請求（同一 Transport，keep-alive 復用）——
-//   - 第一個走完整冷路徑（TCP+TLS+HTTP），作為健康驗證，不計時；
-//     冷 HTTPS ≈ 3×RTT 是握手結構的數學必然，不應反映為「延遲」。
-//   - 第二個復用已建立連線（≈1×RTT），計時——貼近真實瀏覽體驗
-//     （瀏覽器/撥號 p50 皆為已建立連線上的 1×RTT）。
-func DefaultProbe(ctx context.Context, d Dialer) (time.Duration, error) {
-	transport := &http.Transport{
-		DialContext:           d.DialContext,
-		DisableKeepAlives:     false,
-		MaxIdleConnsPerHost:   1,
-		TLSClientConfig:       probeTLSConfig,
-		TLSHandshakeTimeout:   5 * time.Second,
-		ResponseHeaderTimeout: 5 * time.Second,
-	}
-	client := &http.Client{Transport: transport, Timeout: 8 * time.Second}
-	defer transport.CloseIdleConnections() // 每輪自清：不跨輪持久化探測連線
-
-	if err := probeGet(ctx, client, probeURL); err != nil {
-		return 0, err
-	}
-	start := time.Now()
-	if err := probeGet(ctx, client, probeURL); err != nil {
-		return 0, err
-	}
-	return time.Since(start), nil
-}
-
-// probeGet 發出單個 trace 請求並驗證回應；body 讀盡以允許連線復用。
-func probeGet(ctx context.Context, c *http.Client, url string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := c.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("trace 返回 HTTP %d", resp.StatusCode)
-	}
-	return nil
-}
+// 重建節流：wireTunnel.Rebuild 回報成功只代表裝置已建立，WireGuard 還要
+// 1~2 個 RTT 完成握手。冷卻期內的探測失敗不計數也不重建，否則下一輪探測
+// 會把正在握手的隧道再次 Stop，形成自我維持的重建風暴。
+const (
+	rebuildTimeout  = 30 * time.Second
+	rebuildCooldown = 30 * time.Second
+)
 
 type tunnelEntry struct {
-	tunnel     Tunnel
-	running    bool
-	state      State
-	rebuilding bool
+	tunnel        Tunnel
+	running       bool
+	state         State
+	rebuilding    bool
+	cooldownUntil time.Time // 重建後的寬限截止（失敗側豁免）
 }
 
 // Manager 多隧道管理器。
@@ -342,6 +294,7 @@ func (m *Manager) doManualRebuild(ctx context.Context, e *tunnelEntry, t Tunnel)
 	e.state.ConsecutiveFails = 0
 	e.state.LastError = ""
 	e.state.LastLatency = 0
+	e.cooldownUntil = time.Now().Add(rebuildCooldown)
 	m.mu.Unlock()
 	return nil
 }
@@ -397,6 +350,33 @@ func (m *Manager) States() map[string]State {
 	return out
 }
 
+// applyLatency 以 EMA 平滑寫入延遲讀數（呼叫者持 m.mu）。
+// 平滑係數：單次尖峰（DNS 刷新輪/TLS 抖動）只移動 30%，抑制排序與漂移擺動；
+// 丟棄判定仍用原始值，保持尖峰敏感。
+func (e *tunnelEntry) applyLatency(latency time.Duration) {
+	const emaAlpha = 0.3
+	if e.state.LastLatency == 0 {
+		e.state.LastLatency = latency // 首次成功（或重建歸零後）：以原始值起步
+		return
+	}
+	e.state.LastLatency = time.Duration(
+		emaAlpha*float64(latency) + (1-emaAlpha)*float64(e.state.LastLatency))
+}
+
+// RecordLatency 記錄一次延遲專用探測：只更新 EMA 讀數。
+// 失敗與超標一概忽略——健康判定、丟棄門檻與重建只屬健康巡檢路徑，
+// 否則高頻延遲探測會把瞬斷放大成不健康與重建風暴。
+func (m *Manager) RecordLatency(id string, probeErr error, latency time.Duration) {
+	if probeErr != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e, ok := m.entries[id]; ok {
+		e.applyLatency(latency)
+	}
+}
+
 // RecordProbe 記錄一次探測結果：成功恢復健康；連續失敗（含延遲超標）
 // 達閾值轉不健康並觸發自動重建。
 func (m *Manager) RecordProbe(id string, probeErr error, latency time.Duration) {
@@ -408,15 +388,7 @@ func (m *Manager) RecordProbe(id string, probeErr error, latency time.Duration) 
 	}
 	e.state.LastCheck = time.Now()
 	if probeErr == nil {
-		// 平滑係數：單次尖峰（DNS 刷新輪/TLS 抖動）只移動 30%，抑制排序與漂移擺動；
-		// 丟棄判定仍用原始值，保持尖峰敏感。
-		const emaAlpha = 0.3
-		if e.state.LastLatency == 0 {
-			e.state.LastLatency = latency // 首次成功（或重建歸零後）：以原始值起步
-		} else {
-			e.state.LastLatency = time.Duration(
-				emaAlpha*float64(latency) + (1-emaAlpha)*float64(e.state.LastLatency))
-		}
+		e.applyLatency(latency)
 		if m.latencyMax > 0 && latency > m.latencyMax {
 			probeErr = fmt.Errorf("延遲 %s 超過丟棄閾值 %s", latency.Round(time.Millisecond), m.latencyMax.Round(time.Millisecond))
 		} else {
@@ -426,6 +398,12 @@ func (m *Manager) RecordProbe(id string, probeErr error, latency time.Duration) 
 			m.mu.Unlock()
 			return
 		}
+	}
+	// 重建冷卻期：隧道正在重新握手，失敗屬預期，只記錄不判死。
+	if time.Now().Before(e.cooldownUntil) {
+		e.state.LastError = probeErr.Error()
+		m.mu.Unlock()
+		return
 	}
 	e.state.ConsecutiveFails++
 	e.state.LastError = probeErr.Error()
@@ -443,24 +421,39 @@ func (m *Manager) RecordProbe(id string, probeErr error, latency time.Duration) 
 	m.mu.Unlock()
 
 	if t != nil {
-		go func() {
-			defer func() {
-				m.mu.Lock()
-				e.rebuilding = false
-				e.state.Rebuilding = false
-				m.mu.Unlock()
-			}()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := t.Rebuild(ctx); err == nil {
-				// 成功：新隧道延遲未知（排序殿後待重探），錯誤重置
-				m.mu.Lock()
-				e.state.LastLatency = 0
-				e.state.LastError = ""
-				m.mu.Unlock()
-			}
-		}()
+		go m.autoRebuild(t, e)
 	}
+}
+
+// autoRebuild 背景重建並驗證就緒。Rebuild 成功僅代表底層裝置已建立
+// （Start 不等握手），須探測通過才標回健康，否則飄移會選中一條未就緒的出口。
+// 無論成敗都進入冷卻：握手期間的探測失敗不得觸發下一次重建。
+func (m *Manager) autoRebuild(t Tunnel, e *tunnelEntry) {
+	ctx, cancel := context.WithTimeout(context.Background(), rebuildTimeout)
+	defer cancel()
+
+	var lat time.Duration
+	err := t.Rebuild(ctx)
+	if err == nil {
+		pctx, pcancel := context.WithTimeout(ctx, m.probeBudget())
+		lat, err = m.probe(pctx, t)
+		pcancel()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e.rebuilding = false
+	e.state.Rebuilding = false
+	e.cooldownUntil = time.Now().Add(rebuildCooldown)
+	e.state.ConsecutiveFails = 0
+	e.state.LastLatency = 0 // 新隧道延遲未知：排序殿後待重探
+	if err != nil {
+		e.state.LastError = err.Error()
+		return
+	}
+	e.state.Healthy = true
+	e.state.LastError = ""
+	e.applyLatency(lat)
 }
 
 // SetLatencyProbeInterval 設定獨立延遲探測間隔（0 = 停用，延遲隨健康檢查更新）。
@@ -530,7 +523,7 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-healthT.C:
 			m.probeAll(ctx)
 		case <-latTick:
-			m.probeAll(ctx) // 同一探測路徑：更新延遲、計入丟棄與連續失敗判定
+			m.probeLatency(ctx) // 僅更新 EMA：高頻探測不得左右健康判定與重建
 		case <-m.reload:
 			m.mu.RLock()
 			ivl := m.interval
@@ -542,25 +535,45 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-func (m *Manager) probeAll(ctx context.Context) {
+// probeBudget 單次探測的 ctx 預算 = clamp(interval*8/5, 6s, 10s)。
+// 一輪探測 = 冷握手（≈3×RTT）+ 穩態（≈1×RTT）；DefaultProbe 全敗時還要
+// 等 probeRetryDelay 再跑一輪，預算裝不下兩輪則重試秒敗、等於沒有重試。
+// 上限避免長間隔下單輪卡死過久。
+func (m *Manager) probeBudget() time.Duration {
+	m.mu.RLock()
+	b := m.interval * 8 / 5
+	m.mu.RUnlock()
+	switch {
+	case b < 6*time.Second:
+		return 6 * time.Second
+	case b > 10*time.Second:
+		return 10 * time.Second
+	}
+	return b
+}
+
+// probeAll 健康巡檢路徑：更新延遲，並計入丟棄與連續失敗判定。
+func (m *Manager) probeAll(ctx context.Context) { m.probeEach(ctx, m.RecordProbe) }
+
+// probeLatency 延遲專用路徑：只更新 EMA 讀數，不參與健康判定。
+func (m *Manager) probeLatency(ctx context.Context) { m.probeEach(ctx, m.RecordLatency) }
+
+func (m *Manager) probeEach(ctx context.Context, record func(string, error, time.Duration)) {
 	m.mu.RLock()
 	ids := make([]string, 0, len(m.entries))
 	dialers := make(map[string]Dialer, len(m.entries))
 	for id, e := range m.entries {
-		if e.running {
+		// 重建中的隧道底層裝置為 nil：探測必敗且只會污染失敗計數。
+		if e.running && !e.rebuilding {
 			ids = append(ids, id)
 			dialers[id] = e.tunnel
 		}
 	}
-	interval := m.interval
 	m.mu.RUnlock()
 
-	probeTimeout := interval / 2
-	if probeTimeout <= 0 || probeTimeout > 8*time.Second {
-		probeTimeout = 8 * time.Second
-	}
+	probeTimeout := m.probeBudget()
 	// 並行探測：串行會讓單輪最壞 N×timeout，隧道多時健康/延遲數據嚴重滯後。
-	// RecordProbe 內部持鎖，併發安全。
+	// 記錄函數內部持鎖，併發安全。
 	var wg sync.WaitGroup
 	for _, id := range ids {
 		wg.Add(1)
@@ -569,7 +582,7 @@ func (m *Manager) probeAll(ctx context.Context) {
 			pctx, cancel := context.WithTimeout(ctx, probeTimeout)
 			latency, err := m.probe(pctx, dialers[id])
 			cancel()
-			m.RecordProbe(id, err, latency)
+			record(id, err, latency)
 		}(id)
 	}
 	wg.Wait()

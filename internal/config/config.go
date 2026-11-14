@@ -38,7 +38,8 @@ type Upstream struct {
 
 // RoutingConfig 選路偏好參數。
 type RoutingConfig struct {
-	PreferLowestLatency bool `json:"prefer_lowest_latency"` // 全域延遲優先：所有帳號一律走當前延遲最低的健康出口（EMA 平滑後排序）
+	PreferLowestLatency bool `json:"prefer_lowest_latency"` // 全域延遲優先：每帳號黏住一個出口，僅在該出口不通時飄移到當前延遲最低者
+	SwitchMarginMS      int  `json:"switch_margin_ms"`      // 延遲型換黏容差（ms）；0 = 關閉，僅不通才飄移
 }
 
 // Config 頂層配置，持久化為單一 JSON 文件。
@@ -61,7 +62,7 @@ func Default() *Config {
 		ListenWeb:       ":8081",
 		DNSCacheSeconds: 60,
 		HealthCheck: HealthCheckConfig{
-			IntervalSeconds:  30,
+			IntervalSeconds:  5,
 			FailureThreshold: 3,
 		},
 		Upstreams: []Upstream{},
@@ -117,6 +118,9 @@ func (c *Config) Validate() error {
 	if c.HealthCheck.LatencyProbeSeconds < 0 {
 		return fmt.Errorf("health_check.latency_probe_seconds 不可小於 0")
 	}
+	if c.Routing.SwitchMarginMS < 0 {
+		return fmt.Errorf("routing.switch_margin_ms 不可小於 0")
+	}
 	seen := map[string]bool{}
 	for i, u := range c.Upstreams {
 		if u.ID == "" {
@@ -167,7 +171,7 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(raw, &probe); err == nil && probe.DNSCacheSeconds == nil {
 		c.DNSCacheSeconds = 60
 	}
-	// routing.switch_margin_ms 已於 v1.6.9 移除；存量配置中的該鍵為未知鍵，靜默忽略。
+	// routing.switch_margin_ms 於 v1.7.0 回歸：0（含缺鍵）= 僅不通才飄移，無需指標探測。
 	c.FillDefaults()
 	return &c, nil
 }

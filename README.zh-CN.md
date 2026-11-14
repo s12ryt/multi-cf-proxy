@@ -14,8 +14,8 @@
 - **多 WARP 实例**：用户态 WireGuard（wireguard-go + gVisor netstack），无需 TUN 设备、无需 root
 - **双协议入站**：SOCKS5（RFC 1928/1929，仅账号密码认证）与 HTTP 代理（Basic + CONNECT），各一端口
 - **账号绑出口**：每新增上游自动分配「随机用户名 + 随机密码」；绑定出口不健康时自动 failover 到其他健康出口
-- **延迟优选**：备援按探测延迟排序（快者先试；延迟经 EMA 平滑）；可选「全局延迟优先」模式——取健康上游清单、一律走当前延迟最低的健康出口（拨号失败依延迟序降级）
-- **全自动重连**：周期健康探测（经隧道直连 1.1.1.1 trace；keep-alive 稳态计时 ≈1×RTT 贴近实际连线体验，冷连接路径每轮仍完整验证）→ 连续失败达阈值 → 标记不健康并自动重建隧道 → 恢复后自动回到健康池
+- **延迟优选**：备援按探测延迟排序（快者先试；延迟经 EMA 平滑）；可选「全局延迟优先」模式——**每个账号黏住一个出口，仅该出口不通时才漂移**到当前延迟最低的健康出口（`switch_margin_ms` > 0 时，另一出口快超过该毫秒数也会换黏）
+- **全自动重连**：每 5 秒健康探测（经隧道并发直连 1.1.1.1 / 8.8.8.8 / 9.9.9.9 三站，任一通即判通，全败则 0.5 秒后整轮重试一次；keep-alive 稳态计时 ≈1×RTT）→ 连续失败达阈值（默认 3 次）→ 标记不健康并自动重建隧道 → **重建后先探测验证就绪才标回健康**（WireGuard 握手需 1~2 个 RTT，设备建立完成不等于可用）→ 随后 30 秒冷却期内的探测失败不计数也不再重建（防止握手期被下一轮探测砍掉造成重建风暴）→ 恢复后自动回到健康池
 - **流量统计**：每账号 / 每上游的上下行字节数，IPv4 / IPv6 分开
 - **Web 管理**：管理员密码登录（session），上游增删改、WARP 账号自动注册、手动导入 wgcf 配置、换账号密码、设置、统计
 - **单一二进制**：Go 编写，交叉编译 Linux amd64/arm64，无运行时依赖
@@ -101,8 +101,8 @@ curl -x http://warp-xxxx:PASSWORD@VPS:8080 https://www.cloudflare.com/cdn-cgi/tr
   "listen_http": ":8080",
   "listen_web": ":8081",
   "dns_cache_seconds": 60,
-  "routing": { "prefer_lowest_latency": false },
-  "health_check": { "interval_seconds": 30, "failure_threshold": 3, "latency_discard_seconds": 0, "latency_probe_seconds": 0 },
+  "routing": { "prefer_lowest_latency": false, "switch_margin_ms": 0 },
+  "health_check": { "interval_seconds": 5, "failure_threshold": 3, "latency_discard_seconds": 0, "latency_probe_seconds": 0 },
   "upstreams": [
     {
       "id": "uXXXXXXXX",
@@ -138,7 +138,7 @@ internal/web        管理 API（session）+ 嵌入式前端
 
 - SOCKS5 UDP ASSOCIATE 不支持（仅 TCP CONNECT）
 - WARP 自动注册依赖 Cloudflare API 可用性；被风控时请用 wgcf 手动注册后导入配置
-- 全局延迟优先模式下出口 IP 会随延迟漂移而变（需 IP 稳定的网站 session 请保持关闭）
+- 全局延迟优先模式下出口 IP 仅在黏住出口不通时才改变（`switch_margin_ms` > 0 会额外引入延迟型换黏）
 - 账号密码仅在生成时完整显示一次（概览页不回显）
 
 ## 开发
