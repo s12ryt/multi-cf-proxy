@@ -1,18 +1,44 @@
 // 覆蓋 R4：轉發與握手的配置預算。
-// 行 18 轉發緩衝複用（每條連線不得各自配置 32KiB）；行 60 SOCKS5 請求解析配置上限。
+// 行 14 中繼緩衝歸還池中；行 40 雙向轉發收斂；行 66 SOCKS5 請求解析配置上限。
 package inbound
 
 import (
 	"bytes"
 	"io"
 	"net"
-	"runtime"
 	"testing"
 )
 
-// relayOnce 跑一次完整雙向轉發（客戶端寫入後關閉，上游側吞掉資料）。
-func relayOnce(t *testing.T, payload []byte) {
-	t.Helper()
+// TestRelayBufferReturnedToPool 中繼緩衝必須歸還池中：
+// 每條連線各配置兩個 32KiB 緩衝會讓 GC 壓力隨併發線性上升。
+// 用池語意驗證（歸還後立刻取回同一底層陣列），不用全程統計——
+// 新建次數會被 GC 清空池干擾，-race 下尤甚。
+func TestRelayBufferReturnedToPool(t *testing.T) {
+	first := bufPool.Get().(*[]byte)
+	if len(*first) != relayBufSize {
+		t.Fatalf("緩衝大小 = %d, want %d", len(*first), relayBufSize)
+	}
+	bufPool.Put(first)
+	if again := bufPool.Get().(*[]byte); again != first {
+		t.Error("歸還後未取回同一緩衝（池未生效）")
+	} else {
+		bufPool.Put(again)
+	}
+
+	// copyBuffered 必須把借用的緩衝還回去：連續兩次只能新建一個。
+	base := relayBufNew.Load()
+	copyBuffered(io.Discard, bytes.NewReader([]byte("payload")))
+	copyBuffered(io.Discard, bytes.NewReader([]byte("payload")))
+	if grown := relayBufNew.Load() - base; grown > 1 {
+		t.Errorf("兩次複製新建 %d 個緩衝（未歸還）", grown)
+	}
+}
+
+// TestTransferMovesBothDirections 雙向轉發在任一端關閉後收斂。
+func TestTransferMovesBothDirections(t *testing.T) {
+	payload := []byte("hello relay")
+	got := make(chan []byte, 1)
+
 	c1, s1 := net.Pipe()
 	c2, s2 := net.Pipe()
 	go func() {
@@ -20,35 +46,16 @@ func relayOnce(t *testing.T, payload []byte) {
 		s1.Close()
 	}()
 	go func() {
-		io.ReadAll(s2)
+		b, _ := io.ReadAll(s2)
+		got <- b
 		s2.Close()
 	}()
 	transfer(c1, c2)
 	c1.Close()
 	c2.Close()
-}
 
-// TestTransferBufferReuse 轉發緩衝必須取自共用池：
-// 每條連線各配置兩個 32KiB 緩衝會讓 GC 壓力隨併發線性上升。
-// 量「池新建次數」而非進程配置量——後者在 -race 下混入檢測器自身開銷。
-// sync.Pool 是 per-P 本地池，多核下跨 P 取用會 miss，故把測試釘在單 P 上才有確定性。
-func TestTransferBufferReuse(t *testing.T) {
-	prev := runtime.GOMAXPROCS(1)
-	defer runtime.GOMAXPROCS(prev)
-
-	payload := []byte("hello relay")
-	for i := 0; i < 3; i++ {
-		relayOnce(t, payload) // 預熱：填滿雙方向所需的緩衝
-	}
-
-	base := relayBufNew.Load()
-	const runs = 20
-	for i := 0; i < runs; i++ {
-		relayOnce(t, payload)
-	}
-	// 未複用時每輪必新建 2 個（共 40）；複用時池內兩個緩衝足夠全程輪轉。
-	if grown := relayBufNew.Load() - base; grown > 2 {
-		t.Errorf("%d 次轉發新建 %d 個緩衝（未複用）", runs, grown)
+	if b := <-got; string(b) != string(payload) {
+		t.Errorf("上游側收到 %q, want %q", b, payload)
 	}
 }
 
