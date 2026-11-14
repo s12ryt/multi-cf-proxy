@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"runtime"
 	"testing"
 )
 
@@ -29,8 +30,12 @@ func relayOnce(t *testing.T, payload []byte) {
 
 // TestTransferBufferReuse 轉發緩衝必須取自共用池：
 // 每條連線各配置兩個 32KiB 緩衝會讓 GC 壓力隨併發線性上升。
-// 直接量「池新建次數」而非進程配置量——後者在 -race 下混入檢測器自身開銷。
+// 量「池新建次數」而非進程配置量——後者在 -race 下混入檢測器自身開銷。
+// sync.Pool 是 per-P 本地池，多核下跨 P 取用會 miss，故把測試釘在單 P 上才有確定性。
 func TestTransferBufferReuse(t *testing.T) {
+	prev := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(prev)
+
 	payload := []byte("hello relay")
 	for i := 0; i < 3; i++ {
 		relayOnce(t, payload) // 預熱：填滿雙方向所需的緩衝
@@ -41,9 +46,8 @@ func TestTransferBufferReuse(t *testing.T) {
 	for i := 0; i < runs; i++ {
 		relayOnce(t, payload)
 	}
-	// 一次轉發同時用兩個緩衝，留少量裕度給 P 本地池遷移；
-	// 未複用時每輪必新建 2 個（≥40）。
-	if grown := relayBufNew.Load() - base; grown > 4 {
+	// 未複用時每輪必新建 2 個（共 40）；複用時池內兩個緩衝足夠全程輪轉。
+	if grown := relayBufNew.Load() - base; grown > 2 {
 		t.Errorf("%d 次轉發新建 %d 個緩衝（未複用）", runs, grown)
 	}
 }
