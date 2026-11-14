@@ -7,15 +7,20 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // relayBufSize 單方向中繼緩衝；與 io.Copy 默認值一致，對 TCP 吞吐足夠。
 const relayBufSize = 32 * 1024
 
+// relayBufNew 池新建緩衝的次數（測試用複用度量；正常運行下應停在併發峰值）。
+var relayBufNew atomic.Int64
+
 // bufPool 中繼緩衝池：每條代理連線兩個方向共 64KiB，
 // 不複用時併發 1000 條即 64MiB 瞬時堆配置。
 var bufPool = sync.Pool{New: func() any {
+	relayBufNew.Add(1)
 	b := make([]byte, relayBufSize)
 	return &b
 }}

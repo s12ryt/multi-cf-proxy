@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"io"
 	"net"
-	"runtime"
 	"testing"
 )
 
@@ -30,22 +29,22 @@ func relayOnce(t *testing.T, payload []byte) {
 
 // TestTransferBufferReuse 轉發緩衝必須取自共用池：
 // 每條連線各配置兩個 32KiB 緩衝會讓 GC 壓力隨併發線性上升。
+// 直接量「池新建次數」而非進程配置量——後者在 -race 下混入檢測器自身開銷。
 func TestTransferBufferReuse(t *testing.T) {
 	payload := []byte("hello relay")
-	relayOnce(t, payload) // 預熱：首次填池
+	for i := 0; i < 3; i++ {
+		relayOnce(t, payload) // 預熱：填滿雙方向所需的緩衝
+	}
 
+	base := relayBufNew.Load()
 	const runs = 20
-	var m1, m2 runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&m1)
 	for i := 0; i < runs; i++ {
 		relayOnce(t, payload)
 	}
-	runtime.ReadMemStats(&m2)
-
-	per := (m2.TotalAlloc - m1.TotalAlloc) / runs
-	if per > 16*1024 {
-		t.Errorf("每次轉發配置 %d 位元組（超過 16KiB，緩衝未複用）", per)
+	// 一次轉發同時用兩個緩衝，留少量裕度給 P 本地池遷移；
+	// 未複用時每輪必新建 2 個（≥40）。
+	if grown := relayBufNew.Load() - base; grown > 4 {
+		t.Errorf("%d 次轉發新建 %d 個緩衝（未複用）", runs, grown)
 	}
 }
 
