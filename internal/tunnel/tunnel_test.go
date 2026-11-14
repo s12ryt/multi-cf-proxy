@@ -140,9 +140,9 @@ func TestHealthyList(t *testing.T) {
 		m.RecordProbe("u2", errors.New("probe fail"), 0)
 	}
 
-	ones := m.Healthy()
-	if len(ones) != 1 || ones[0].ID() != "u1" {
-		t.Errorf("Healthy() = %v", ones)
+	ones := m.HealthyRanked()
+	if len(ones) != 1 || ones[0].Tunnel.ID() != "u1" {
+		t.Errorf("HealthyRanked() = %v", ones)
 	}
 	st := m.States()["u2"]
 	if st.Healthy || st.ConsecutiveFails != 3 {
@@ -182,7 +182,7 @@ func TestLatencyDiscardThreshold(t *testing.T) {
 	if st.Healthy || st.ConsecutiveFails != 2 || st.Rebuilds != 1 {
 		t.Fatalf("達閾值後應丟棄並重建: %+v", st)
 	}
-	if got := m.Healthy(); len(got) != 0 {
+	if got := m.HealthyRanked(); len(got) != 0 {
 		t.Errorf("延遲過高的上游不應留在健康池: %v", got)
 	}
 
@@ -400,9 +400,9 @@ func TestLatencyProbeDisabled(t *testing.T) {
 
 // --- v1.6.5：延遲排序選路 + 健康參數熱重載 ---
 
-// TestHealthySortedByLatency 健康隧道按最近探測延遲升序；
-// 未探測（延遲未知）殿後；同值保持配置順序。
-func TestHealthySortedByLatency(t *testing.T) {
+// TestHealthyRanked 健康隧道按最近探測延遲升序；
+// 未探測（延遲未知）殿後；同值保持配置順序；延遲值隨隧道一併返回。
+func TestHealthyRanked(t *testing.T) {
 	var created []*fakeTunnel
 	m := NewManager(fakeFactory(&created), nil, time.Hour, 3)
 	if err := m.Sync(context.Background(), []*config.Upstream{
@@ -413,30 +413,34 @@ func TestHealthySortedByLatency(t *testing.T) {
 	m.RecordProbe("u1", nil, 120*time.Millisecond)
 	m.RecordProbe("u2", nil, 50*time.Millisecond)
 	// u3 未探測 → 殿後；u2(50) < u1(120)
-	got := m.HealthySortedByLatency()
+	got := m.HealthyRanked()
 	want := []string{"u2", "u1", "u3"}
 	if len(got) != len(want) {
 		t.Fatalf("應返回 3 條, got %d", len(got))
 	}
 	for i, id := range want {
-		if got[i].ID() != id {
-			t.Errorf("順序[%d] = %s, want %s", i, got[i].ID(), id)
+		if got[i].Tunnel.ID() != id {
+			t.Errorf("順序[%d] = %s, want %s", i, got[i].Tunnel.ID(), id)
 		}
+	}
+	// 延遲隨隧道一併交付，選路端無需回查
+	if got[0].Latency != 50*time.Millisecond || got[1].Latency != 120*time.Millisecond || got[2].Latency != 0 {
+		t.Errorf("延遲未隨清單返回: %v", got)
 	}
 
 	// 同值穩定保序：u3 探測為 50ms 與 u2 相同 → u2 在前（配置順序）
 	m.RecordProbe("u3", nil, 50*time.Millisecond)
-	got = m.HealthySortedByLatency()
+	got = m.HealthyRanked()
 	want = []string{"u2", "u3", "u1"}
 	for i, id := range want {
-		if got[i].ID() != id {
-			t.Errorf("同值保序[%d] = %s, want %s", i, got[i].ID(), id)
+		if got[i].Tunnel.ID() != id {
+			t.Errorf("同值保序[%d] = %s, want %s", i, got[i].Tunnel.ID(), id)
 		}
 	}
 }
 
-// TestHealthySortedByLatencyExcludesUnhealthy 不健康/停用的隧道不在清單。
-func TestHealthySortedByLatencyExcludesUnhealthy(t *testing.T) {
+// TestHealthyRankedExcludesUnhealthy 不健康/停用的隧道不在清單。
+func TestHealthyRankedExcludesUnhealthy(t *testing.T) {
 	var created []*fakeTunnel
 	m := NewManager(fakeFactory(&created), nil, time.Hour, 2)
 	if err := m.Sync(context.Background(), []*config.Upstream{
@@ -448,8 +452,8 @@ func TestHealthySortedByLatencyExcludesUnhealthy(t *testing.T) {
 		m.RecordProbe("u2", errors.New("fail"), 0)
 	}
 	m.RecordProbe("u1", nil, 10*time.Millisecond)
-	got := m.HealthySortedByLatency()
-	if len(got) != 1 || got[0].ID() != "u1" {
+	got := m.HealthyRanked()
+	if len(got) != 1 || got[0].Tunnel.ID() != "u1" {
 		t.Errorf("應僅剩健康的 u1, got %v", got)
 	}
 }

@@ -58,7 +58,10 @@ func (h *HTTP) Stop() { h.wg.Wait() }
 
 func (h *HTTP) handle(conn net.Conn) {
 	defer conn.Close()
-	br := bufio.NewReader(conn)
+	// 池化讀取器：每條連線原本各自配置一個 4KiB bufio.Reader。
+	// CONNECT 隧道化後 br 僅用於沖出已緩衝位元組，之後不再讀取，歸還仍安全。
+	br := getReader(conn)
+	defer putReader(br)
 	for {
 		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		req, err := http.ReadRequest(br)
@@ -163,12 +166,17 @@ func (h *HTTP) forward(conn net.Conn, br *bufio.Reader, req *http.Request, user,
 		return err
 	}
 
-	resp, err := http.ReadResponse(bufio.NewReader(remote), req)
+	rbr := getReader(remote)
+	resp, err := http.ReadResponse(rbr, req)
 	if err != nil {
+		putReader(rbr)
 		writeRawResponse(conn, http.StatusBadGateway, "讀取上游回應失敗")
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		resp.Body.Close()
+		putReader(rbr)
+	}()
 	for _, h_ := range hopHeaders {
 		resp.Header.Del(h_)
 	}

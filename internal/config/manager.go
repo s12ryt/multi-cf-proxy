@@ -3,8 +3,8 @@ package config
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -86,15 +86,21 @@ func (m *Manager) SetAdminPassword(pw string) error {
 	})
 }
 
-// cloneConfig 深拷貝（經 JSON 序列化往返，簡單可靠）。
+// cloneConfig 深拷貝。Config 僅 Upstreams（及其 Addresses）為可變結構，
+// 其餘皆為值型別——手寫拷貝即可完全隔離，JSON 往返要跑兩輪反射與全量字串配置。
 func cloneConfig(c *Config) (*Config, error) {
-	data, err := json.Marshal(c)
-	if err != nil {
-		return nil, err
+	if c == nil {
+		return nil, fmt.Errorf("配置為空")
 	}
-	var out Config
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, err
+	out := *c
+	if c.Upstreams != nil {
+		out.Upstreams = make([]Upstream, len(c.Upstreams))
+		copy(out.Upstreams, c.Upstreams)
+		for i := range out.Upstreams {
+			if addrs := c.Upstreams[i].Addresses; addrs != nil {
+				out.Upstreams[i].Addresses = slices.Clone(addrs)
+			}
+		}
 	}
 	return &out, nil
 }

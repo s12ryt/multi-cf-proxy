@@ -3,7 +3,7 @@ package stats
 
 import (
 	"net"
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,6 +46,11 @@ type counters struct {
 	up6, down6         atomic.Int64
 	conns, totalConns  atomic.Int64
 	lastActiveUnixNano atomic.Int64
+}
+
+// touch 標記最近活躍時刻。
+func (e *counters) touch() {
+	e.lastActiveUnixNano.Store(time.Now().UnixNano())
 }
 
 // Collector 收集器。零值可用。
@@ -97,7 +102,7 @@ func dialPercentiles(samples []int64) DialStats {
 	}
 	sorted := make([]int64, n)
 	copy(sorted, samples)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	slices.Sort(sorted) // 泛型排序：免反射與比較閉包
 	rank := func(p int) int64 {
 		r := (p*n + 99) / 100 // ceil(p*n/100)
 		if r < 1 {
@@ -113,13 +118,12 @@ func dialPercentiles(samples []int64) DialStats {
 	}
 }
 
-func (c *Collector) upEntry(key string) *counters {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	e, ok := c.upstreams[key]
+// entry 取得（或建立）映射中的計數器；呼叫方須持 c.mu。
+func entry(m map[string]*counters, key string) *counters {
+	e, ok := m[key]
 	if !ok {
 		e = &counters{}
-		c.upstreams[key] = e
+		m[key] = e
 	}
 	return e
 }
@@ -127,41 +131,58 @@ func (c *Collector) upEntry(key string) *counters {
 func (c *Collector) accountEntry(key string) *counters {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e, ok := c.accounts[key]
-	if !ok {
-		e = &counters{}
-		c.accounts[key] = e
+	if c.accounts == nil {
+		c.accounts = map[string]*counters{}
 	}
-	return e
+	return entry(c.accounts, key)
+}
+
+// pairEntries 一次取鎖取得上游與帳號計數器（連線建立路徑原本要取三次鎖）。
+func (c *Collector) pairEntries(upstreamID, account string) (*counters, *counters) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.upstreams == nil {
+		c.upstreams = map[string]*counters{}
+	}
+	if c.accounts == nil {
+		c.accounts = map[string]*counters{}
+	}
+	return entry(c.upstreams, upstreamID), entry(c.accounts, account)
 }
 
 // AccountUp 記錄帳號上行位元組數。
 func (c *Collector) AccountUp(name string, n int) {
 	e := c.accountEntry(name)
 	e.up.Add(int64(n))
-	e.lastActiveUnixNano.Store(time.Now().UnixNano())
+	e.touch()
 }
 
 // AccountDown 記錄帳號下行位元組數。
 func (c *Collector) AccountDown(name string, n int) {
 	e := c.accountEntry(name)
 	e.down.Add(int64(n))
-	e.lastActiveUnixNano.Store(time.Now().UnixNano())
+	e.touch()
 }
 
 // ConnOpen 帳號開啟一條連接。
 func (c *Collector) ConnOpen(name string) {
-	e := c.accountEntry(name)
-	e.conns.Add(1)
-	e.totalConns.Add(1)
-	e.lastActiveUnixNano.Store(time.Now().UnixNano())
+	connOpen(c.accountEntry(name))
 }
 
 // ConnClose 帳號關閉一條連接。
 func (c *Collector) ConnClose(name string) {
-	e := c.accountEntry(name)
+	connClose(c.accountEntry(name))
+}
+
+func connOpen(e *counters) {
+	e.conns.Add(1)
+	e.totalConns.Add(1)
+	e.touch()
+}
+
+func connClose(e *counters) {
 	e.conns.Add(-1)
-	e.lastActiveUnixNano.Store(time.Now().UnixNano())
+	e.touch()
 }
 
 // Snapshot 取當前統計快照。
@@ -193,28 +214,21 @@ func (c *Collector) Snapshot() Snapshot {
 	return Snapshot{Upstreams: ups, Accounts: accs, Dial: dial}
 }
 
-type accKind int
-
-const (
-	kindUp accKind = iota
-	kindDown
-)
-
-// wrapErrCounting 已統計位元組數的連線包裝器。
+// countingConn 計量連線：計數器在包裝時解析完成，
+// 每個封包只做原子加法——不查映射、不取鎖、不配置、無閉包間接呼叫。
 type countingConn struct {
 	net.Conn
-	collector *Collector
-	account   string
-	acc       func(kind accKind, n int)
-	closed    bool
-	once      sync.Once
+	up, down *atomic.Int64 // 上游方向計數（已按 IP 族群選定）
+	acct     *counters     // 帳號計數
+	closed   atomic.Bool
 }
 
 func (c *countingConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
-		c.acc(kindDown, n) // 對客戶端而言，從上游讀 = 下行
-		c.collector.AccountDown(c.account, n)
+		c.down.Add(int64(n)) // 對客戶端而言，從上游讀 = 下行
+		c.acct.down.Add(int64(n))
+		c.acct.touch()
 	}
 	return n, err
 }
@@ -222,24 +236,33 @@ func (c *countingConn) Read(b []byte) (int, error) {
 func (c *countingConn) Write(b []byte) (int, error) {
 	n, err := c.Conn.Write(b)
 	if n > 0 {
-		c.acc(kindUp, n)
-		c.collector.AccountUp(c.account, n)
+		c.up.Add(int64(n))
+		c.acct.up.Add(int64(n))
+		c.acct.touch()
 	}
 	return n, err
 }
 
 func (c *countingConn) Close() error {
-	c.once.Do(func() {
-		c.closed = true
-		c.collector.ConnClose(c.account)
-	})
+	if c.closed.CompareAndSwap(false, true) {
+		connClose(c.acct)
+	}
 	return c.Conn.Close()
 }
 
-func isIPv6(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
+// isIPv6Addr 判斷遠端位址是否為 IPv6；優先走結構化位址，
+// 避免 String() 格式化與再解析（每條連線一次字串配置）。
+func isIPv6Addr(addr net.Addr) bool {
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		return a.IP != nil && a.IP.To4() == nil
+	case *net.UDPAddr:
+		return a.IP != nil && a.IP.To4() == nil
+	}
+	s := addr.String()
+	host, _, err := net.SplitHostPort(s)
 	if err != nil {
-		host = addr
+		host = s
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.To4() == nil
@@ -248,23 +271,13 @@ func isIPv6(addr string) bool {
 // WrapConn 包裝一條已建立的出站連線：自動按 IP 族群與方向統計流量。
 // 上游統計在 Wrap 時確定 v4/v6 歸屬（連線的遠端位址族群）。
 func (c *Collector) WrapConn(conn net.Conn, upstreamID, account string) net.Conn {
-	v6 := isIPv6(conn.RemoteAddr().String())
-	e := c.upEntry(upstreamID)
-	acc := func(kind accKind, n int) {
-		if v6 {
-			if kind == kindUp {
-				e.up6.Add(int64(n))
-			} else {
-				e.down6.Add(int64(n))
-			}
-		} else {
-			if kind == kindUp {
-				e.up.Add(int64(n))
-			} else {
-				e.down.Add(int64(n))
-			}
-		}
+	ue, ae := c.pairEntries(upstreamID, account)
+	connOpen(ae)
+	cc := &countingConn{Conn: conn, acct: ae}
+	if isIPv6Addr(conn.RemoteAddr()) {
+		cc.up, cc.down = &ue.up6, &ue.down6
+	} else {
+		cc.up, cc.down = &ue.up, &ue.down
 	}
-	c.ConnOpen(account)
-	return &countingConn{Conn: conn, collector: c, account: account, acc: acc}
+	return cc
 }

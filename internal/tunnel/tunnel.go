@@ -299,35 +299,26 @@ func (m *Manager) doManualRebuild(ctx context.Context, e *tunnelEntry, t Tunnel)
 	return nil
 }
 
-// Healthy 返回所有運行中且健康的隧道（按配置順序）。
-func (m *Manager) Healthy() []Tunnel {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	var out []Tunnel
-	for _, id := range m.order {
-		if e, ok := m.entries[id]; ok && e.running && e.state.Healthy {
-			out = append(out, e.tunnel)
-		}
-	}
-	return out
+// Ranked 健康隧道與其 EMA 平滑延遲（0 = 尚無讀數，含重建後歸零）。
+type Ranked struct {
+	Tunnel  Tunnel
+	Latency time.Duration
 }
 
-// HealthySortedByLatency 返回健康隧道，按最近一次成功探測延遲升序；
+// HealthyRanked 返回健康隧道，按最近一次成功探測延遲升序；
 // 未探測過（延遲未知）的殿後；同值保持配置順序（穩定排序）。
-// 供延遲優選選路使用。
-func (m *Manager) HealthySortedByLatency() []Tunnel {
+// 延遲隨隧道一併交付：選路端每條連線需比較延遲，逐個回查會各自取鎖並退化為 O(N) 查詢。
+func (m *Manager) HealthyRanked() []Ranked {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	var out []Tunnel
-	lat := make(map[string]time.Duration, len(m.order))
+	out := make([]Ranked, 0, len(m.order))
 	for _, id := range m.order {
 		if e, ok := m.entries[id]; ok && e.running && e.state.Healthy {
-			out = append(out, e.tunnel)
-			lat[id] = e.state.LastLatency
+			out = append(out, Ranked{e.tunnel, e.state.LastLatency})
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		li, lj := lat[out[i].ID()], lat[out[j].ID()]
+		li, lj := out[i].Latency, out[j].Latency
 		if li == 0 {
 			return false // 未知延遲殿後（同為未知保持原序）
 		}
@@ -348,6 +339,14 @@ func (m *Manager) States() map[string]State {
 		out[id] = e.state
 	}
 	return out
+}
+
+// IsHealthy 上游是否運行中且健康；零配置直讀，不經 States() 全量複製。
+func (m *Manager) IsHealthy(id string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.entries[id]
+	return ok && e.running && e.state.Healthy
 }
 
 // applyLatency 以 EMA 平滑寫入延遲讀數（呼叫者持 m.mu）。
@@ -538,11 +537,15 @@ func (m *Manager) Run(ctx context.Context) {
 // probeBudget 單次探測的 ctx 預算 = clamp(interval*8/5, 6s, 10s)。
 // 一輪探測 = 冷握手（≈3×RTT）+ 穩態（≈1×RTT）；DefaultProbe 全敗時還要
 // 等 probeRetryDelay 再跑一輪，預算裝不下兩輪則重試秒敗、等於沒有重試。
-// 上限避免長間隔下單輪卡死過久。
+// 上限避免長間隔下單輪卡死過久。呼叫方持鎖時用 budgetLocked。
 func (m *Manager) probeBudget() time.Duration {
 	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.budgetLocked()
+}
+
+func (m *Manager) budgetLocked() time.Duration {
 	b := m.interval * 8 / 5
-	m.mu.RUnlock()
 	switch {
 	case b < 6*time.Second:
 		return 6 * time.Second
@@ -552,6 +555,27 @@ func (m *Manager) probeBudget() time.Duration {
 	return b
 }
 
+// probeTarget 一輪探測的對象快照。
+type probeTarget struct {
+	id     string
+	dialer Dialer
+}
+
+// probeTargets 單次持鎖取得本輪探測對象與 ctx 預算。
+// 重建中的隧道底層裝置為 nil：探測必敗且只會污染失敗計數。
+// 一次取齊：巡檢每輪都跑，分次取鎖只是多餘的競爭點。
+func (m *Manager) probeTargets() ([]probeTarget, time.Duration) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]probeTarget, 0, len(m.order))
+	for _, id := range m.order {
+		if e, ok := m.entries[id]; ok && e.running && !e.rebuilding {
+			out = append(out, probeTarget{id, e.tunnel})
+		}
+	}
+	return out, m.budgetLocked()
+}
+
 // probeAll 健康巡檢路徑：更新延遲，並計入丟棄與連續失敗判定。
 func (m *Manager) probeAll(ctx context.Context) { m.probeEach(ctx, m.RecordProbe) }
 
@@ -559,31 +583,20 @@ func (m *Manager) probeAll(ctx context.Context) { m.probeEach(ctx, m.RecordProbe
 func (m *Manager) probeLatency(ctx context.Context) { m.probeEach(ctx, m.RecordLatency) }
 
 func (m *Manager) probeEach(ctx context.Context, record func(string, error, time.Duration)) {
-	m.mu.RLock()
-	ids := make([]string, 0, len(m.entries))
-	dialers := make(map[string]Dialer, len(m.entries))
-	for id, e := range m.entries {
-		// 重建中的隧道底層裝置為 nil：探測必敗且只會污染失敗計數。
-		if e.running && !e.rebuilding {
-			ids = append(ids, id)
-			dialers[id] = e.tunnel
-		}
-	}
-	m.mu.RUnlock()
+	targets, probeTimeout := m.probeTargets()
 
-	probeTimeout := m.probeBudget()
 	// 並行探測：串行會讓單輪最壞 N×timeout，隧道多時健康/延遲數據嚴重滯後。
 	// 記錄函數內部持鎖，併發安全。
 	var wg sync.WaitGroup
-	for _, id := range ids {
-		wg.Add(1)
-		go func(id string) {
+	wg.Add(len(targets))
+	for _, t := range targets {
+		go func(t probeTarget) {
 			defer wg.Done()
 			pctx, cancel := context.WithTimeout(ctx, probeTimeout)
-			latency, err := m.probe(pctx, dialers[id])
+			latency, err := m.probe(pctx, t.dialer)
 			cancel()
-			record(id, err, latency)
-		}(id)
+			record(t.id, err, latency)
+		}(t)
 	}
 	wg.Wait()
 }

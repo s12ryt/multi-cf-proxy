@@ -2,6 +2,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -115,11 +117,17 @@ func (s *Server) newSession() string {
 	return token
 }
 
+// validSession 驗證 token；過期項就地移除——否則失效 token 會長期佔住映射
+// （原本只在登入時清理，長駐進程下隨 cookie 輪替無上限增長）。
 func (s *Server) validSession(token string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	exp, ok := s.sessions[token]
-	if !ok || time.Now().After(exp) {
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(s.sessions, token)
 		return false
 	}
 	return true
@@ -151,10 +159,25 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 
 // ---- 輔助 ----
 
+// jsonBufPool 回應編碼緩衝：面板輪詢 overview 的回應體有數 KiB，
+// 直接串流編碼會對 ResponseWriter 多次小寫入且無 Content-Length。
+var jsonBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// writeJSON 先編碼到池化緩衝，再帶 Content-Length 一次寫出。
 func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	buf := jsonBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer jsonBufPool.Put(buf)
+
+	if err := json.NewEncoder(buf).Encode(v); err != nil {
+		http.Error(w, `{"error":"編碼失敗"}`, http.StatusInternalServerError)
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	h.Set("Content-Length", strconv.Itoa(buf.Len()))
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	w.Write(buf.Bytes())
 }
 
 func readJSON(r *http.Request, v any) error {

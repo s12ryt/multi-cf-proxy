@@ -10,7 +10,6 @@ import (
 	"net"
 	"strconv"
 	"sync"
-	"time"
 
 	"multi-cf-proxy/internal/dispatcher"
 )
@@ -30,6 +29,17 @@ const (
 	methodNoAcceptable = 0xFF
 	cmdConnect         = 0x01
 	cmdUDP             = 0x03
+)
+
+// maxAddrLen 握手中任一可變欄位的上限（域名/帳號/密碼皆為單位元組長度前綴）。
+const maxAddrLen = 255
+
+// 固定回覆字節串：握手路徑逐條連線各寫一次，不應每次新配置切片。
+var (
+	replyNoAcceptable = []byte{0x05, methodNoAcceptable}
+	replyUserPass     = []byte{0x05, methodUserPass}
+	replyAuthFail     = []byte{0x01, 0x01}
+	replyAuthOK       = []byte{0x01, 0x00}
 )
 
 // SOCKS5 入站服務器。
@@ -70,45 +80,49 @@ func (s *SOCKS5) handle(conn net.Conn) {
 }
 
 func (s *SOCKS5) serve(conn net.Conn) error {
-	hdr := make([]byte, 2)
-	if _, err := io.ReadFull(conn, hdr); err != nil {
+	// 單一 scratch 緩衝貫穿整段握手：方法列表、帳密、請求位址都最多 255 位元組，
+	// 原本每個欄位各 make 一次（一條連線近十次小配置）。
+	var scratch [maxAddrLen]byte
+	buf := scratch[:]
+
+	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
 		return err
 	}
-	if hdr[0] != 0x05 {
-		return fmt.Errorf("不支援的 SOCKS 版本 %#x", hdr[0])
+	if buf[0] != 0x05 {
+		return fmt.Errorf("不支援的 SOCKS 版本 %#x", buf[0])
 	}
-	methods := make([]byte, hdr[1])
-	if _, err := io.ReadFull(conn, methods); err != nil {
+	nMethods := int(buf[1])
+	if _, err := io.ReadFull(conn, buf[:nMethods]); err != nil {
 		return err
 	}
 	hasUserPass := false
-	for _, m := range methods {
+	for _, m := range buf[:nMethods] {
 		if m == methodUserPass {
 			hasUserPass = true
 			break
 		}
 	}
 	if !hasUserPass {
-		conn.Write([]byte{0x05, methodNoAcceptable})
+		conn.Write(replyNoAcceptable)
 		return errors.New("客戶端未提供帳密方法")
 	}
-	if _, err := conn.Write([]byte{0x05, methodUserPass}); err != nil {
+	if _, err := conn.Write(replyUserPass); err != nil {
 		return err
 	}
 
-	username, password, err := readUserPass(conn)
+	username, password, err := readUserPass(conn, buf)
 	if err != nil {
 		return err
 	}
 	if !s.svc.Authenticate(username, password) {
-		conn.Write([]byte{0x01, 0x01}) // RFC1929: 失敗
+		conn.Write(replyAuthFail) // RFC1929: 失敗
 		return dispatcher.ErrAuth
 	}
-	if _, err := conn.Write([]byte{0x01, 0x00}); err != nil {
+	if _, err := conn.Write(replyAuthOK); err != nil {
 		return err
 	}
 
-	req, err := readRequest(conn)
+	req, err := readRequest(conn, buf)
 	if err != nil {
 		return err
 	}
@@ -139,32 +153,27 @@ func (s *SOCKS5) serve(conn net.Conn) error {
 	return nil
 }
 
-// readUserPass 讀取 RFC1929 帳密子協商。
-func readUserPass(conn net.Conn) (string, string, error) {
-	ver := make([]byte, 1)
-	if _, err := io.ReadFull(conn, ver); err != nil {
+// readUserPass 讀取 RFC1929 帳密子協商；buf 為呼叫方提供的 scratch（≥255 位元組）。
+func readUserPass(r io.Reader, buf []byte) (string, string, error) {
+	if _, err := io.ReadFull(r, buf[:2]); err != nil {
 		return "", "", err
 	}
-	if ver[0] != 0x01 {
-		return "", "", fmt.Errorf("RFC1929 版本不符 %#x", ver[0])
+	if buf[0] != 0x01 {
+		return "", "", fmt.Errorf("RFC1929 版本不符 %#x", buf[0])
 	}
-	ulen := make([]byte, 1)
-	if _, err := io.ReadFull(conn, ulen); err != nil {
+	ulen := int(buf[1])
+	if _, err := io.ReadFull(r, buf[:ulen]); err != nil {
 		return "", "", err
 	}
-	user := make([]byte, ulen[0])
-	if _, err := io.ReadFull(conn, user); err != nil {
+	user := string(buf[:ulen])
+	if _, err := io.ReadFull(r, buf[:1]); err != nil {
 		return "", "", err
 	}
-	plen := make([]byte, 1)
-	if _, err := io.ReadFull(conn, plen); err != nil {
+	plen := int(buf[0])
+	if _, err := io.ReadFull(r, buf[:plen]); err != nil {
 		return "", "", err
 	}
-	pass := make([]byte, plen[0])
-	if _, err := io.ReadFull(conn, pass); err != nil {
-		return "", "", err
-	}
-	return string(user), string(pass), nil
+	return user, string(buf[:plen]), nil
 }
 
 type socksRequest struct {
@@ -172,71 +181,51 @@ type socksRequest struct {
 	addr string // host:port
 }
 
-// readRequest 讀取 CONNECT/UDP 請求（僅解析，不校驗 cmd）。
-func readRequest(conn net.Conn) (*socksRequest, error) {
-	hdr := make([]byte, 4) // VER CMD RSV ATYP
-	if _, err := io.ReadFull(conn, hdr); err != nil {
-		return nil, err
+// readRequest 讀取 CONNECT/UDP 請求（僅解析，不校驗 cmd）；buf 為 scratch（≥255 位元組）。
+func readRequest(r io.Reader, buf []byte) (socksRequest, error) {
+	if _, err := io.ReadFull(r, buf[:4]); err != nil { // VER CMD RSV ATYP
+		return socksRequest{}, err
 	}
-	if hdr[0] != 0x05 {
-		return nil, fmt.Errorf("請求版本不符 %#x", hdr[0])
+	if buf[0] != 0x05 {
+		return socksRequest{}, fmt.Errorf("請求版本不符 %#x", buf[0])
 	}
+	cmd, atyp := buf[1], buf[3]
 	var host string
-	switch hdr[3] {
+	switch atyp {
 	case 0x01: // IPv4
-		b := make([]byte, 4)
-		if _, err := io.ReadFull(conn, b); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(r, buf[:4]); err != nil {
+			return socksRequest{}, err
 		}
-		host = net.IP(b).String()
+		host = net.IP(buf[:4]).String()
 	case 0x03: // 域名
-		l := make([]byte, 1)
-		if _, err := io.ReadFull(conn, l); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(r, buf[:1]); err != nil {
+			return socksRequest{}, err
 		}
-		b := make([]byte, l[0])
-		if _, err := io.ReadFull(conn, b); err != nil {
-			return nil, err
+		l := int(buf[0])
+		if _, err := io.ReadFull(r, buf[:l]); err != nil {
+			return socksRequest{}, err
 		}
-		host = string(b)
+		host = string(buf[:l])
 	case 0x04: // IPv6
-		b := make([]byte, 16)
-		if _, err := io.ReadFull(conn, b); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(r, buf[:16]); err != nil {
+			return socksRequest{}, err
 		}
-		host = net.IP(b).String()
+		host = net.IP(buf[:16]).String()
 	default:
-		return nil, fmt.Errorf("不支援的 ATYP %#x", hdr[3])
+		return socksRequest{}, fmt.Errorf("不支援的 ATYP %#x", atyp)
 	}
-	portBytes := make([]byte, 2)
-	if _, err := io.ReadFull(conn, portBytes); err != nil {
-		return nil, err
+	if _, err := io.ReadFull(r, buf[:2]); err != nil {
+		return socksRequest{}, err
 	}
-	port := binary.BigEndian.Uint16(portBytes)
-	return &socksRequest{cmd: hdr[1], addr: net.JoinHostPort(host, strconv.Itoa(int(port)))}, nil
+	port := binary.BigEndian.Uint16(buf[:2])
+	return socksRequest{cmd: cmd, addr: net.JoinHostPort(host, strconv.Itoa(int(port)))}, nil
 }
+
+// replySucceeded 等固定回覆：VER REP RSV ATYP=IPv4 BND.ADDR=0.0.0.0 BND.PORT=0。
+var replyTemplate = [10]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
 
 func writeReply(conn net.Conn, rep byte) {
-	// VER REP RSV ATYP=IPv4 BND.ADDR=0.0.0.0 BND.PORT=0
-	conn.Write([]byte{0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-}
-
-// pastDeadline 已過去的時刻，用於解除另一方向 io.Copy 的阻塞。
-func pastDeadline() time.Time { return time.Unix(1, 0) }
-
-// transfer 雙向轉發直到任一方向結束。
-func transfer(a, b net.Conn) {
-	done := make(chan struct{}, 2)
-	go func() {
-		io.Copy(a, b)
-		a.SetDeadline(pastDeadline())
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(b, a)
-		b.SetDeadline(pastDeadline())
-		done <- struct{}{}
-	}()
-	<-done
-	<-done
+	r := replyTemplate
+	r[1] = rep
+	conn.Write(r[:])
 }

@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
@@ -38,12 +39,15 @@ type wireTunnel struct {
 	endpoint    string // 配置中的 endpoint（可為域名）
 	fingerprint string
 	localAddrs  []netip.Addr
+	dns         *dnsCache // 建立時即固定：撥號熱路徑讀取，不隨重建更換
+
+	// active 當前 netstack（原子發佈）：撥號每條連線都要讀，
+	// 與 Start/Stop/Rebuild 共用 mu 會讓重建期間所有撥號排隊。
+	active atomic.Pointer[netstack.Net]
 
 	mu               sync.Mutex
 	dev              *device.Device
-	net              *netstack.Net
-	resolvedEndpoint string    // 每次 Start/Rebuild 重新解析出的 IP:port
-	dns              *dnsCache // 經隧道解析結果的本機快取（消除重複 DNS 往返）
+	resolvedEndpoint string // 每次 Start/Rebuild 重新解析出的 IP:port
 }
 
 // dnsTTLSetter 可接收 DNS 快取 TTL 的隧道（Manager 運行時傳播）。
@@ -83,9 +87,7 @@ func WireFactory(u *config.Upstream) (Tunnel, error) {
 	}
 	// 解析器綁定當前 netstack（Rebuild 後自動指向新實例）
 	w.dns = newDNSCache(DefaultDNSCacheSeconds*time.Second, dnsCacheMaxEntries, func(ctx context.Context, host string) ([]string, error) {
-		w.mu.Lock()
-		tn := w.net
-		w.mu.Unlock()
+		tn := w.active.Load()
 		if tn == nil {
 			return nil, fmt.Errorf("隧道 %s 未運行", w.id)
 		}
@@ -132,14 +134,17 @@ func resolveEndpoint(endpoint string) (string, error) {
 	return net.JoinHostPort(ips[0], port), nil
 }
 
+// ipcConfig 組裝 wireguard-go 的 IpcSet 配置字串（呼叫方持 mu）。
 func (w *wireTunnel) ipcConfig() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "private_key=%s\n", w.privateHex)
-	fmt.Fprintf(&b, "public_key=%s\n", w.peerHex)
-	b.WriteString("allowed_ip=0.0.0.0/0\n")
-	b.WriteString("allowed_ip=::/0\n")
-	fmt.Fprintf(&b, "endpoint=%s\n", w.resolvedEndpoint)
-	b.WriteString("persistent_keepalive_interval=25\n")
+	b.Grow(len(w.privateHex) + len(w.peerHex) + len(w.resolvedEndpoint) + 128)
+	b.WriteString("private_key=")
+	b.WriteString(w.privateHex)
+	b.WriteString("\npublic_key=")
+	b.WriteString(w.peerHex)
+	b.WriteString("\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\nendpoint=")
+	b.WriteString(w.resolvedEndpoint)
+	b.WriteString("\npersistent_keepalive_interval=25\n")
 	return b.String()
 }
 
@@ -171,7 +176,7 @@ func (w *wireTunnel) Start(ctx context.Context) error {
 		return fmt.Errorf("隧道 %s 啟動失敗: %w", w.id, err)
 	}
 	w.dev = dev
-	w.net = tnet
+	w.active.Store(tnet)
 	return nil
 }
 
@@ -180,9 +185,9 @@ func (w *wireTunnel) Stop() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.dev != nil {
+		w.active.Store(nil) // 先撤下出口：新撥號立即快速失敗，不會打在關閉中的裝置
 		w.dev.Close()
 		w.dev = nil
-		w.net = nil
 	}
 }
 
@@ -205,15 +210,12 @@ func (w *wireTunnel) DialContext(ctx context.Context, network, addr string) (net
 	default:
 		return nil, fmt.Errorf("隧道 %s 不支援的網絡類型 %q", w.id, network)
 	}
-	w.mu.Lock()
-	tnet := w.net
-	cache := w.dns
-	w.mu.Unlock()
+	tnet := w.active.Load()
 	if tnet == nil {
 		return nil, fmt.Errorf("隧道 %s 未運行", w.id)
 	}
 
-	candidates, err := resolveTarget(ctx, cache, addr)
+	candidates, err := resolveTarget(ctx, w.dns, addr)
 	if err != nil {
 		return nil, err
 	}

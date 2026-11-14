@@ -26,14 +26,10 @@ var (
 type Registry interface {
 	// Bound 返回帳號綁定的上游（不論健康狀態）。
 	Bound(upstreamID string) (tunnel.Tunnel, bool)
-	// Healthy 返回健康上游清單（按配置順序）。
-	Healthy() []tunnel.Tunnel
-	// HealthySortedByLatency 返回健康上游清單（按 EMA 平滑延遲升序，未知殿後）。
-	HealthySortedByLatency() []tunnel.Tunnel
+	// HealthyRanked 返回健康上游及其 EMA 平滑延遲（延遲升序，未知殿後）。
+	HealthyRanked() []tunnel.Ranked
 	// IsHealthy 查詢指定上游健康狀態。
 	IsHealthy(upstreamID string) bool
-	// Latency 返回 EMA 平滑延遲；0 表示尚無讀數。
-	Latency(upstreamID string) time.Duration
 }
 
 // Service 鑑權選路服務。
@@ -134,7 +130,7 @@ func (s *Service) EgressSnapshot() map[string]string {
 //   - 全域延遲優先：黏住出口健康時恆為首位；僅不通（或超出容差）才飄移，
 //     其餘為撥號失敗時的降級序。
 func (s *Service) candidates(username, boundID string) []tunnel.Tunnel {
-	sorted := s.registry.HealthySortedByLatency()
+	ranked := s.registry.HealthyRanked()
 
 	s.rmu.Lock()
 	prefer := s.prefer
@@ -143,19 +139,19 @@ func (s *Service) candidates(username, boundID string) []tunnel.Tunnel {
 	s.rmu.Unlock()
 
 	if prefer {
-		return s.preferOrder(sorted, cur, margin)
+		return preferOrder(ranked, cur, margin)
 	}
 
-	var out []tunnel.Tunnel
-	seen := map[string]bool{}
+	// 僅需排除一個已置首的綁定 ID，字串比較即可；去重 map 是純配置浪費。
+	out := make([]tunnel.Tunnel, 0, len(ranked)+1)
+	head := ""
 	if t, ok := s.registry.Bound(boundID); ok && s.registry.IsHealthy(boundID) {
 		out = append(out, t)
-		seen[boundID] = true
+		head = boundID
 	}
-	for _, t := range sorted {
-		if !seen[t.ID()] {
-			out = append(out, t)
-			seen[t.ID()] = true
+	for _, r := range ranked {
+		if r.Tunnel.ID() != head {
+			out = append(out, r.Tunnel)
 		}
 	}
 	return out
@@ -163,50 +159,42 @@ func (s *Service) candidates(username, boundID string) []tunnel.Tunnel {
 
 // preferOrder 全域模式候選序：首位＝黏住出口（健康時），不通才改選飄移目標；
 // margin > 0 時，最快者比黏住出口快超過容差才換黏（雙方延遲均需已知）。
-func (s *Service) preferOrder(sorted []tunnel.Tunnel, cur string, margin time.Duration) []tunnel.Tunnel {
-	if len(sorted) == 0 {
+func preferOrder(ranked []tunnel.Ranked, cur string, margin time.Duration) []tunnel.Tunnel {
+	if len(ranked) == 0 {
 		return nil
 	}
-	head := s.driftTarget(sorted)
-	if stick := pick(sorted, cur); stick != nil {
-		head = stick
-		if best := s.driftTarget(sorted); margin > 0 && best.ID() != cur {
-			cl, bl := s.registry.Latency(cur), s.registry.Latency(best.ID())
-			if cl > 0 && bl > 0 && cl-bl > margin {
-				head = best
-			}
+	// 單次掃描同時定位黏住出口與飄移目標（延遲已知的最低者，
+	// 抑制重建後歸零的隧道搶首位）；延遲已在清單內，無需回查註冊表。
+	head, drift := -1, -1
+	for i := range ranked {
+		if head < 0 && cur != "" && ranked[i].Tunnel.ID() == cur {
+			head = i
+		}
+		if drift < 0 && ranked[i].Latency > 0 {
+			drift = i
+		}
+		if head >= 0 && drift >= 0 {
+			break
 		}
 	}
-	out := make([]tunnel.Tunnel, 0, len(sorted))
-	out = append(out, head)
-	for _, t := range sorted {
-		if t.ID() != head.ID() {
-			out = append(out, t)
+	if drift < 0 { // 全清單皆無讀數：退回延遲排序首位
+		drift = 0
+	}
+	switch {
+	case head < 0: // 黏住出口不通（或尚未黏住）：改選飄移目標
+		head = drift
+	case margin > 0 && drift != head: // margin = 0 永不因延遲換黏
+		cl, bl := ranked[head].Latency, ranked[drift].Latency
+		if cl > 0 && bl > 0 && cl-bl > margin {
+			head = drift
+		}
+	}
+	out := make([]tunnel.Tunnel, 0, len(ranked))
+	out = append(out, ranked[head].Tunnel)
+	for i := range ranked {
+		if i != head {
+			out = append(out, ranked[i].Tunnel)
 		}
 	}
 	return out
-}
-
-// driftTarget 飄移目標：延遲最低且已知者（抑制重建後歸零的隧道搶首位）；
-// 全清單皆無讀數時退回首位。
-func (s *Service) driftTarget(sorted []tunnel.Tunnel) tunnel.Tunnel {
-	for _, t := range sorted {
-		if s.registry.Latency(t.ID()) > 0 {
-			return t
-		}
-	}
-	return sorted[0]
-}
-
-// pick 依 ID 取出清單中的隧道；id 為空或不在清單返回 nil。
-func pick(list []tunnel.Tunnel, id string) tunnel.Tunnel {
-	if id == "" {
-		return nil
-	}
-	for _, t := range list {
-		if t.ID() == id {
-			return t
-		}
-	}
-	return nil
 }

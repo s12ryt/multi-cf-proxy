@@ -51,12 +51,19 @@ func (r *stubRegistry) Bound(id string) (tunnel.Tunnel, bool) {
 	t, ok := r.bound[id]
 	return t, ok
 }
-func (r *stubRegistry) Healthy() []tunnel.Tunnel                { return r.healthy }
-func (r *stubRegistry) HealthySortedByLatency() []tunnel.Tunnel { return r.healthy }
+func (r *stubRegistry) HealthyRanked() []tunnel.Ranked { return mkRanked(r.healthy, r.lat) }
 func (r *stubRegistry) IsHealthy(id string) bool {
 	return r.health[id]
 }
-func (r *stubRegistry) Latency(id string) time.Duration { return r.lat[id] }
+
+// mkRanked 把測試清單與延遲表組成 Ranked 序列（延遲隨隧道一併交付）。
+func mkRanked(list []tunnel.Tunnel, lat map[string]time.Duration) []tunnel.Ranked {
+	out := make([]tunnel.Ranked, len(list))
+	for i, t := range list {
+		out[i] = tunnel.Ranked{Tunnel: t, Latency: lat[t.ID()]}
+	}
+	return out
+}
 
 func mkService(t *testing.T, reg Registry) *Service {
 	t.Helper()
@@ -290,7 +297,7 @@ type latRegistry struct {
 	sorted []tunnel.Tunnel
 }
 
-func (r *latRegistry) HealthySortedByLatency() []tunnel.Tunnel { return r.sorted }
+func (r *latRegistry) HealthyRanked() []tunnel.Ranked { return mkRanked(r.sorted, r.lat) }
 
 func newLatService(t *testing.T) (*Service, *latRegistry) {
 	t.Helper()

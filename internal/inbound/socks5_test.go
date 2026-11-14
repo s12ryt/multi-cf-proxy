@@ -38,11 +38,9 @@ type echoRegistry struct {
 }
 
 func (r *echoRegistry) Bound(id string) (tunnel.Tunnel, bool) { return r.t, true }
-func (r *echoRegistry) Healthy() []tunnel.Tunnel              { return []tunnel.Tunnel{r.t} }
 func (r *echoRegistry) IsHealthy(id string) bool              { return true }
-func (r *echoRegistry) Latency(id string) time.Duration       { return time.Millisecond }
-func (r *echoRegistry) HealthySortedByLatency() []tunnel.Tunnel {
-	return []tunnel.Tunnel{r.t}
+func (r *echoRegistry) HealthyRanked() []tunnel.Ranked {
+	return []tunnel.Ranked{{Tunnel: r.t, Latency: time.Millisecond}}
 }
 
 // startEcho 啟動 echo server，返回地址。

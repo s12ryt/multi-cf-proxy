@@ -22,7 +22,7 @@ func TestDNSCacheHitMiss(t *testing.T) {
 	c := newDNSCache(60*time.Second, 256, resolve)
 
 	ips, err := c.resolveHost(context.Background(), "example.com")
-	if err != nil || len(ips) != 1 || ips[0] != "93.184.216.34" {
+	if err != nil || len(ips) != 1 || ips[0].String() != "93.184.216.34" {
 		t.Fatalf("首次解析失敗: %v %v", ips, err)
 	}
 	if *calls != 1 {

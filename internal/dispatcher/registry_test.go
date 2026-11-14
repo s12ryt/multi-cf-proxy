@@ -29,8 +29,8 @@ func TestTunnelManagerRegistry(t *testing.T) {
 	if _, ok := reg.Bound("nope"); ok {
 		t.Error("不存在的上游應返回 false")
 	}
-	if len(reg.Healthy()) != 2 {
-		t.Errorf("Healthy() = %d", len(reg.Healthy()))
+	if len(reg.HealthyRanked()) != 2 {
+		t.Errorf("HealthyRanked() = %d", len(reg.HealthyRanked()))
 	}
 	if !reg.IsHealthy("u1") {
 		t.Error("u1 初始應樂觀健康")
@@ -41,8 +41,8 @@ func TestTunnelManagerRegistry(t *testing.T) {
 	if reg.IsHealthy("u2") {
 		t.Error("u2 應不健康")
 	}
-	if len(reg.Healthy()) != 1 {
-		t.Errorf("Healthy() = %d", len(reg.Healthy()))
+	if len(reg.HealthyRanked()) != 1 {
+		t.Errorf("HealthyRanked() = %d", len(reg.HealthyRanked()))
 	}
 }
 
